@@ -1,0 +1,44 @@
+[package]
+name = "apy-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server for DeFi lending rate aggregation across multiple chains"
+
+[dependencies]
+# MCP server (latest version with server_handler support)
+rmcp = { version = "1.7", features = ["server", "transport-io"] }
+rmcp-macros = "1.7"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Base64 encoding/decoding (for XDR)
+base64 = "0.22"
+
+# Stellar XDR types (for proper LedgerKey construction)
+stellar-xdr = { version = "22", features = ["std"] }
+
+# JSON Schema generation for MCP tool parameters
+schemars = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Chrono for timestamps
+chrono = "0.4"
+
+# Async trait
+async-trait = "0.1"
+stellar-strkey = "0.0.16"
