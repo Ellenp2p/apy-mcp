@@ -95,7 +95,30 @@ async fn auth_middleware(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // First, check if it's a GitHub OAuth token
+    // 1. Check if it's an OAuth access token (from /oauth/token)
+    let oauth_token = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        "SELECT token, user_id, client_id, scope FROM oauth_access_tokens WHERE token = ? AND expires_at > ?",
+    )
+    .bind(raw_key)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some((_token, user_id, _client_id, _scope)) = oauth_token {
+        tracing::debug!(user_id = %user_id, "OAuth access token validated");
+
+        let custom_headers = extract_custom_headers(&headers);
+        request
+            .extensions_mut()
+            .insert(crate::mcp::tools::RequestMetadata {
+                custom_headers,
+            });
+
+        return Ok(next.run(request).await);
+    }
+
+    // 2. Check if it's a GitHub OAuth token
     let github_user = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, Option<String>)>(
         "SELECT id, login, name, email, avatar_url FROM github_users WHERE access_token = ?",
     )
@@ -127,7 +150,7 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    // Not a GitHub token, try API key
+    // 3. Not an OAuth token, try API key
     let api_key = state
         .db
         .validate_key(raw_key)
@@ -618,25 +641,39 @@ async fn oauth_token_handler(
         "authorization_code" => {
             let code = params.get("code").ok_or(StatusCode::BAD_REQUEST)?;
             let client_id = params.get("client_id").ok_or(StatusCode::BAD_REQUEST)?;
-            let client_secret = params.get("client_secret").ok_or(StatusCode::BAD_REQUEST)?;
+            let empty_secret = String::new();
+            let client_secret = params.get("client_secret").unwrap_or(&empty_secret);
 
-            // Validate client credentials
+            // Check if client exists, if not auto-register (for VS Code compatibility)
             use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(client_secret.as_bytes());
-            let secret_hash = hex::encode(hasher.finalize());
-
-            let client = sqlx::query_as::<_, (String, String)>(
-                "SELECT client_id, client_secret FROM oauth_clients WHERE client_id = ? AND client_secret = ?",
+            let existing_client = sqlx::query_as::<_, (String, String)>(
+                "SELECT client_id, client_secret FROM oauth_clients WHERE client_id = ?",
             )
             .bind(client_id)
-            .bind(&secret_hash)
             .fetch_optional(&state.db.pool)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            if client.is_none() {
-                return Err(StatusCode::UNAUTHORIZED);
+            if existing_client.is_none() {
+                // Auto-register client
+                let now = chrono::Utc::now().to_rfc3339();
+                let mut hasher = Sha256::new();
+                hasher.update(client_secret.as_bytes());
+                let secret_hash = hex::encode(hasher.finalize());
+
+                sqlx::query(
+                    "INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(client_id)
+                .bind(&secret_hash)
+                .bind("VS Code MCP Client")
+                .bind("[]")
+                .bind(&now)
+                .execute(&state.db.pool)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+                tracing::info!(client_id = %client_id, "Auto-registered OAuth client");
             }
 
             // Validate authorization code
@@ -674,13 +711,18 @@ async fn oauth_token_handler(
                     .await
                     .ok();
 
+                    tracing::info!(user_id = %user_id, "Access token issued");
+
                     Ok(axum::Json(serde_json::json!({
                         "access_token": access_token,
                         "token_type": "Bearer",
                         "expires_in": 3600
                     })))
                 }
-                None => Err(StatusCode::UNAUTHORIZED),
+                None => {
+                    tracing::warn!(code = %code, "Invalid or expired authorization code");
+                    Err(StatusCode::UNAUTHORIZED)
+                }
             }
         }
         _ => Err(StatusCode::BAD_REQUEST),
