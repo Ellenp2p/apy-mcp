@@ -17,7 +17,7 @@ use rmcp::transport::streamable_http_server::{
 use tower_service::Service;
 use tower_http::cors::{CorsLayer, Any};
 
-use crate::{db::Database, mcp::tools::ApyMcpTools, oauth::OAuthConfig};
+use crate::{db::Database, mcp::tools::ApyMcpTools};
 
 /// Rate limiter entry
 #[derive(Debug, Clone)]
@@ -201,48 +201,6 @@ async fn auth_middleware(
         });
 
     Ok(next.run(request).await)
-}
-
-/// Handle MCP POST requests
-async fn mcp_post_handler(
-    State(state): State<HttpState>,
-    request: Request,
-) -> Response {
-    // Create a new service instance for each request (stateless mode)
-    let config = StreamableHttpServerConfig::default()
-        .with_stateful_mode(false)
-        .with_json_response(true)
-        .with_allowed_hosts(["localhost", "127.0.0.1", "::1"]);
-
-    let session_manager = Arc::new(LocalSessionManager::default());
-
-    let service_factory = {
-        let tools = state.tools.clone();
-        move || -> Result<_, std::io::Error> { Ok(tools.clone()) }
-    };
-
-    let mut service = StreamableHttpService::new(service_factory, session_manager, config);
-
-    // Forward the request to the MCP service
-    let response = match service.call(request).await {
-        Ok(response) => response,
-        Err(_) => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(
-                http_body_util::Full::new(bytes::Bytes::from("Internal Server Error")).boxed(),
-            )
-            .unwrap(),
-    };
-
-    // Convert from BoxBody<Bytes, Infallible> to axum::body::Body
-    let (parts, body) = response.into_parts();
-    let body = body
-        .map_err(|e: std::convert::Infallible| -> Box<dyn std::error::Error + Send + Sync> {
-            match e {}
-        })
-        .boxed_unsync();
-    let body = Body::new(body);
-    Response::from_parts(parts, body)
 }
 
 /// Health check endpoint
@@ -737,7 +695,7 @@ pub async fn start_http_server(
     admin_token: Option<String>,
 ) -> anyhow::Result<()> {
     let state = HttpState {
-        tools,
+        tools: tools.clone(),
         db: db.clone(),
         admin_token: admin_token.clone(),
         rate_limiters: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
@@ -748,7 +706,6 @@ pub async fn start_http_server(
         .route("/health", get(health_handler))
         .route("/.well-known/oauth-authorization-server", get(oauth_metadata_handler))
         .route("/.well-known/oauth-protected-resource", get(protected_resource_metadata_handler))
-        .route("/mcp", get(protected_resource_metadata_handler))  // VS Code checks this
         .route("/oauth/authorize", get(oauth_authorize_handler).post(oauth_authorize_post_handler))
         .route("/oauth/register", post(oauth_register_handler))
         .route("/oauth/token", post(oauth_token_handler))
@@ -764,9 +721,18 @@ pub async fn start_http_server(
         .route("/admin/oauth/providers/{id}/deactivate", delete(crate::admin::deactivate_oauth_provider))
         .route("/admin/oauth/providers/{id}/reactivate", post(crate::admin::reactivate_oauth_provider));
 
-    // Build MCP routes (auth required)
+    // Build MCP service (like official example)
+    let tools_for_service = tools.clone();
+    let mcp_service: StreamableHttpService<crate::mcp::tools::ApyMcpTools, LocalSessionManager> =
+        StreamableHttpService::new(
+            move || Ok(tools_for_service.clone()),
+            LocalSessionManager::default().into(),
+            StreamableHttpServerConfig::default(),
+        );
+
+    // Build MCP routes (auth required) - use nest_service like official example
     let mcp_routes = Router::new()
-        .route("/mcp", axum::routing::post(mcp_post_handler))
+        .nest_service("/mcp", mcp_service)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
