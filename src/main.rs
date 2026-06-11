@@ -321,23 +321,8 @@ async fn main() -> Result<()> {
             // Fall back to environment variable if not provided via CLI
             let admin_token = admin_token.or_else(|| std::env::var("ADMIN_TOKEN").ok());
 
-            // Build OAuth config
-            let oauth_config = build_oauth_config(
-                &addr,
-                github_client_id,
-                github_client_secret,
-                google_client_id,
-                google_client_secret,
-                custom_oauth_provider,
-                custom_oauth_client_id,
-                custom_oauth_client_secret,
-                custom_oauth_auth_url,
-                custom_oauth_token_url,
-                custom_oauth_user_info_url,
-                custom_oauth_scopes,
-            );
-
-            http::start_http_server(addr, tools, db, admin_token, oauth_config).await?;
+            // Start HTTP server (OAuth providers are now managed via database)
+            http::start_http_server(addr, tools, db, admin_token).await?;
         }
         Commands::Admin { command } => match command {
             AdminCommands::CreateKey {

@@ -174,6 +174,150 @@ pub async fn delete_key(
     Ok(StatusCode::OK)
 }
 
+// ── OAuth Provider Management ────────────────────────────────────────
+
+/// Request to create an OAuth provider
+#[derive(Debug, Deserialize)]
+pub struct CreateOAuthProviderRequest {
+    /// Provider name (e.g., "github", "google", "keycloak")
+    pub name: String,
+    /// OAuth issuer URL (for dynamic registration) OR auth URL (for manual)
+    pub issuer: Option<String>,
+    /// Manual configuration (if not using dynamic registration)
+    pub auth_url: Option<String>,
+    pub token_url: Option<String>,
+    pub user_info_url: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// Comma-separated scopes
+    pub scopes: Option<String>,
+}
+
+/// List all OAuth providers
+pub async fn list_oauth_providers(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    let providers = crate::oauth::OAuthProvider::list(&state.db.pool)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(axum::Json(serde_json::json!({
+        "providers": providers
+    })))
+}
+
+/// Create an OAuth provider (dynamic or manual)
+pub async fn create_oauth_provider(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+    axum::extract::Json(req): axum::extract::Json<CreateOAuthProviderRequest>,
+) -> Result<(StatusCode, axum::Json<serde_json::Value>), StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    let scopes: Vec<String> = req
+        .scopes
+        .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_default();
+
+    let provider = if let Some(issuer) = &req.issuer {
+        // Dynamic registration (RFC 7591)
+        crate::oauth::OAuthProvider::create_with_dynamic_registration(
+            &state.db.pool,
+            &req.name,
+            issuer,
+            &scopes,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "Failed to create OAuth provider");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    } else if let (Some(auth_url), Some(token_url), Some(client_id), Some(client_secret)) = (
+        &req.auth_url,
+        &req.token_url,
+        &req.client_id,
+        &req.client_secret,
+    ) {
+        // Manual configuration
+        crate::oauth::OAuthProvider::create_manual(
+            &state.db.pool,
+            &req.name,
+            auth_url,
+            token_url,
+            req.user_info_url.as_deref(),
+            client_id,
+            client_secret,
+            &scopes,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "Failed to create OAuth provider");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    } else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+
+    Ok((
+        StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "id": provider.id,
+            "name": provider.name,
+            "auth_url": provider.auth_url,
+            "is_dynamic": provider.is_dynamic,
+            "client_id": provider.client_id,
+        })),
+    ))
+}
+
+/// Delete an OAuth provider
+pub async fn delete_oauth_provider(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    crate::oauth::OAuthProvider::delete(&state.db.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
+}
+
+/// Deactivate an OAuth provider
+pub async fn deactivate_oauth_provider(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    crate::oauth::OAuthProvider::deactivate(&state.db.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
+}
+
+/// Reactivate an OAuth provider
+pub async fn reactivate_oauth_provider(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    crate::oauth::OAuthProvider::reactivate(&state.db.pool, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
+}
+
 /// Build the admin routes (no state type parameter - merged with main router)
 pub fn admin_routes() -> Router<crate::http::HttpState> {
     Router::new()

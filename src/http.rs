@@ -242,7 +242,6 @@ pub async fn start_http_server(
     tools: ApyMcpTools,
     db: Database,
     admin_token: Option<String>,
-    oauth_config: Option<OAuthConfig>,
 ) -> anyhow::Result<()> {
     let state = HttpState {
         tools,
@@ -258,7 +257,12 @@ pub async fn start_http_server(
         .route("/admin/keys/{key_id}", delete(crate::admin::delete_key))
         .route("/admin/keys/{key_id}/deactivate", delete(crate::admin::deactivate_key))
         .route("/admin/keys/{key_id}/reactivate", post(crate::admin::reactivate_key))
-        .route("/admin/stats", get(crate::admin::get_stats));
+        .route("/admin/stats", get(crate::admin::get_stats))
+        .route("/admin/oauth/providers", get(crate::admin::list_oauth_providers))
+        .route("/admin/oauth/providers", post(crate::admin::create_oauth_provider))
+        .route("/admin/oauth/providers/{id}", delete(crate::admin::delete_oauth_provider))
+        .route("/admin/oauth/providers/{id}/deactivate", delete(crate::admin::deactivate_oauth_provider))
+        .route("/admin/oauth/providers/{id}/reactivate", post(crate::admin::reactivate_oauth_provider));
 
     // Build MCP routes (auth required)
     let mcp_routes = Router::new()
@@ -270,11 +274,8 @@ pub async fn start_http_server(
 
     // Build OAuth routes if configured
     let oauth_routes = crate::oauth::oauth_router_without_state();
-    let oauth_callback_routes = if let Some(config) = oauth_config {
-        Some(crate::oauth::oauth_callback_router(config, db.pool.clone()))
-    } else {
-        None
-    };
+    let base_url = format!("http://localhost:{}", addr.port());
+    let oauth_callback_routes = crate::oauth::oauth_callback_router(db.pool.clone(), base_url);
 
     // Combine all routes with CORS
     let cors = CorsLayer::new()
@@ -282,17 +283,13 @@ pub async fn start_http_server(
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
-    let mut app = Router::new()
+    let app = Router::new()
         .merge(public_routes)
         .merge(mcp_routes)
         .merge(oauth_routes)
+        .merge(oauth_callback_routes)
         .layer(cors)
         .with_state(state);
-
-    // Add OAuth callback routes if configured (different state type)
-    if let Some(callback_routes) = oauth_callback_routes {
-        app = app.merge(callback_routes);
-    }
 
     tracing::info!("Starting HTTP server on {}", addr);
     if admin_token.is_some() {

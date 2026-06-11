@@ -105,40 +105,63 @@ docker-compose up
 | `/admin/keys/{id}/reactivate` | POST | Admin Token | Reactivate API key |
 | `/admin/stats` | GET | Admin Token | Usage statistics |
 
-## GitHub OAuth Setup
+## OAuth Setup (RFC 7591 Dynamic Client Registration)
 
-### 1. Create GitHub OAuth App
+### 方式一：动态注册（推荐）
 
-1. Go to https://github.com/settings/developers
-2. Click "New OAuth App"
-3. Fill in:
-   - **Application name**: `APY MCP`
-   - **Homepage URL**: `http://localhost:3000` (or your domain)
-   - **Authorization callback URL**: `http://localhost:3000/auth/github/callback`
-4. Save **Client ID** and **Client Secret**
-
-### 2. Run Server with OAuth
+支持 RFC 7591 的 OAuth Provider 可以自动注册客户端，无需手动配置 `client_id` 和 `client_secret`。
 
 ```bash
-cargo run -- http \
-  --github-client-id YOUR_CLIENT_ID \
-  --github-client-secret YOUR_CLIENT_SECRET
+# 通过 Admin API 动态添加 Provider
+curl -X POST http://localhost:3000/admin/oauth/providers \
+  -H "Authorization: Bearer your-admin-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "keycloak",
+    "issuer": "https://your-keycloak.com/realms/master"
+  }'
 ```
 
-### 3. Login via OAuth
+服务器会自动：
+1. 发现 OAuth 端点 (RFC 8414)
+2. 注册为客户端 (RFC 7591)
+3. 存储 `client_id` 和 `client_secret`
 
-1. Open `http://localhost:3000/auth/github` in browser
-2. Click "Login with GitHub"
-3. Authorize the app
-4. You'll be redirected back with an access token
-
-### 4. Use OAuth Token
+### 方式二：手动配置
 
 ```bash
-curl -X POST http://localhost:3000/mcp \
-  -H "Authorization: Bearer YOUR_GITHUB_ACCESS_TOKEN" \
+curl -X POST http://localhost:3000/admin/oauth/providers \
+  -H "Authorization: Bearer your-admin-token" \
   -H "Content-Type: application/json" \
-  -d '...'
+  -d '{
+    "name": "github",
+    "auth_url": "https://github.com/login/oauth/authorize",
+    "token_url": "https://github.com/login/oauth/access_token",
+    "user_info_url": "https://api.github.com/user",
+    "client_id": "YOUR_CLIENT_ID",
+    "client_secret": "YOUR_CLIENT_SECRET",
+    "scopes": "read:user,user:email"
+  }'
+```
+
+### 管理 OAuth Providers
+
+```bash
+# 列出所有 Providers
+curl http://localhost:3000/admin/oauth/providers \
+  -H "Authorization: Bearer your-admin-token"
+
+# 删除 Provider
+curl -X DELETE http://localhost:3000/admin/oauth/providers/1 \
+  -H "Authorization: Bearer your-admin-token"
+```
+
+### 登录
+
+```
+http://localhost:3000/auth/github    → GitHub 登录
+http://localhost:3000/auth/google    → Google 登录
+http://localhost:3000/auth/keycloak  → Keycloak 登录
 ```
 
 ## API Key Management
