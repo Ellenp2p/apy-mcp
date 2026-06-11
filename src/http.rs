@@ -236,6 +236,24 @@ async fn health_handler() -> impl IntoResponse {
     )
 }
 
+/// RFC 9728 - OAuth Protected Resource Metadata
+/// VS Code needs this to discover how to authenticate with the MCP server
+async fn protected_resource_metadata_handler() -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    Ok(axum::Json(serde_json::json!({
+        "resource": "http://localhost:3000/mcp",
+        "authorization_servers": [
+            {
+                "issuer": "http://localhost:3000",
+                "authorization_endpoint": "http://localhost:3000/oauth/authorize",
+                "token_endpoint": "http://localhost:3000/oauth/token",
+                "registration_endpoint": "http://localhost:3000/oauth/register"
+            }
+        ],
+        "scopes_supported": ["openid", "profile", "email"],
+        "bearer_methods_supported": ["header"]
+    })))
+}
+
 /// RFC 8414 - OAuth Server Metadata Discovery
 /// VS Code and other MCP clients use this to discover OAuth endpoints
 async fn oauth_metadata_handler(
@@ -257,6 +275,140 @@ async fn oauth_metadata_handler(
     })))
 }
 
+/// User registration page
+async fn register_page_handler() -> Result<axum::response::Html<String>, StatusCode> {
+    let html = r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APY MCP - Register</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #0f1117; color: #e4e6f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
+        .card { background: #1a1d29; border: 1px solid #2d3148; border-radius: 12px; padding: 32px; width: 400px; }
+        h1 { margin: 0 0 24px 0; font-size: 24px; }
+        h1 span { color: #6c5ce7; }
+        input { width: 100%; padding: 12px; border: 1px solid #2d3148; border-radius: 8px; background: #0f1117; color: #e4e6f0; font-size: 14px; margin-bottom: 12px; box-sizing: border-box; }
+        input:focus { outline: none; border-color: #6c5ce7; }
+        button { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #6c5ce7; color: white; font-size: 16px; cursor: pointer; }
+        button:hover { background: #7c6ef7; }
+        .link { text-align: center; margin-top: 16px; font-size: 14px; }
+        .link a { color: #6c5ce7; text-decoration: none; }
+        .link a:hover { text-decoration: underline; }
+        .error { background: rgba(231,76,60,0.2); color: #e74c3c; padding: 10px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; display: none; }
+        .success { background: rgba(0,184,148,0.2); color: #00b894; padding: 10px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>⚡ <span>APY</span> MCP Register</h1>
+        <div class="error" id="error"></div>
+        <div class="success" id="success"></div>
+        <form id="registerForm">
+            <input type="text" id="username" placeholder="Username (min 3 chars)" required minlength="3">
+            <input type="email" id="email" placeholder="Email (optional)">
+            <input type="password" id="password" placeholder="Password (min 6 chars)" required minlength="6">
+            <input type="password" id="password2" placeholder="Confirm Password" required>
+            <button type="submit">Register</button>
+        </form>
+        <div class="link">
+            Already have an account? <a href="/oauth/authorize">Login</a>
+        </div>
+    </div>
+    <script>
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const errorEl = document.getElementById('error');
+            const successEl = document.getElementById('success');
+            errorEl.style.display = 'none';
+            successEl.style.display = 'none';
+
+            const username = document.getElementById('username').value;
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            const password2 = document.getElementById('password2').value;
+
+            if (password !== password2) {
+                errorEl.textContent = 'Passwords do not match';
+                errorEl.style.display = 'block';
+                return;
+            }
+
+            try {
+                const response = await fetch('/auth/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, email: email || null, password })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    successEl.textContent = 'Registration successful! You can now login.';
+                    successEl.style.display = 'block';
+                    document.getElementById('registerForm').reset();
+                } else {
+                    errorEl.textContent = data.error || 'Registration failed';
+                    errorEl.style.display = 'block';
+                }
+            } catch (error) {
+                errorEl.textContent = 'Network error: ' + error.message;
+                errorEl.style.display = 'block';
+            }
+        });
+    </script>
+</body>
+</html>"#;
+
+    Ok(axum::response::Html(html.to_string()))
+}
+
+/// User registration endpoint
+async fn user_register_handler(
+    State(state): State<HttpState>,
+    axum::extract::Json(req): axum::extract::Json<serde_json::Value>,
+) -> Result<(StatusCode, axum::Json<serde_json::Value>), StatusCode> {
+    let username = req["username"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+    let password = req["password"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+    let email = req["email"].as_str();
+
+    if username.len() < 3 {
+        return Ok((StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
+            "error": "Username must be at least 3 characters"
+        }))));
+    }
+
+    if password.len() < 6 {
+        return Ok((StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
+            "error": "Password must be at least 6 characters"
+        }))));
+    }
+
+    // Check if user already exists
+    let existing = crate::oauth::User::get_by_username(&state.db.pool, username)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if existing.is_some() {
+        return Ok((StatusCode::CONFLICT, axum::Json(serde_json::json!({
+            "error": "Username already exists"
+        }))));
+    }
+
+    // Create user
+    let user = crate::oauth::User::create(&state.db.pool, username, password, email)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tracing::info!(user_id = user.id, username = %username, "User registered");
+
+    Ok((StatusCode::CREATED, axum::Json(serde_json::json!({
+        "id": user.id,
+        "username": user.username,
+        "message": "User registered successfully"
+    }))))
+}
+
 /// OAuth Authorization endpoint - returns login page
 async fn oauth_authorize_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -266,6 +418,13 @@ async fn oauth_authorize_handler(
     let state = params.get("state").cloned().unwrap_or_default();
     let code_challenge = params.get("code_challenge").cloned().unwrap_or_default();
     let scope = params.get("scope").cloned().unwrap_or_default();
+    let error = params.get("error").cloned().unwrap_or_default();
+
+    let error_msg = if error == "invalid_credentials" {
+        r#"<div style="background: rgba(231,76,60,0.2); color: #e74c3c; padding: 10px; border-radius: 8px; margin-bottom: 16px; font-size: 14px;">Invalid username or password</div>"#
+    } else {
+        ""
+    };
 
     // Generate a simple login page
     let html = format!(
@@ -285,6 +444,9 @@ async fn oauth_authorize_handler(
         input:focus {{ outline: none; border-color: #6c5ce7; }}
         button {{ width: 100%; padding: 12px; border: none; border-radius: 8px; background: #6c5ce7; color: white; font-size: 16px; cursor: pointer; }}
         button:hover {{ background: #7c6ef7; }}
+        .link {{ text-align: center; margin-top: 16px; font-size: 14px; }}
+        .link a {{ color: #6c5ce7; text-decoration: none; }}
+        .link a:hover {{ text-decoration: underline; }}
     </style>
 </head>
 <body>
@@ -294,6 +456,7 @@ async fn oauth_authorize_handler(
             <strong>Client ID:</strong> {client_id}<br>
             <strong>Scope:</strong> {scope}
         </div>
+        {error_msg}
         <form method="POST" action="/oauth/authorize">
             <input type="hidden" name="client_id" value="{client_id}">
             <input type="hidden" name="redirect_uri" value="{redirect_uri}">
@@ -304,6 +467,9 @@ async fn oauth_authorize_handler(
             <input type="password" name="password" placeholder="Password" required>
             <button type="submit">Login & Authorize</button>
         </form>
+        <div class="link">
+            Don't have an account? <a href="/auth/register">Register</a>
+        </div>
     </div>
 </body>
 </html>"#,
@@ -311,7 +477,8 @@ async fn oauth_authorize_handler(
         scope = scope,
         redirect_uri = redirect_uri,
         state = state,
-        code_challenge = code_challenge
+        code_challenge = code_challenge,
+        error_msg = error_msg
     );
 
     Ok(axum::response::Html(html))
@@ -329,11 +496,26 @@ async fn oauth_authorize_post_handler(
     let username = params.get("username").cloned().unwrap_or_default();
     let password = params.get("password").cloned().unwrap_or_default();
 
-    // Simple authentication (in production, use proper auth)
-    // For now, accept any non-empty credentials
-    if username.is_empty() || password.is_empty() {
-        return Ok(axum::response::Redirect::to("/oauth/authorize?error=invalid_credentials"));
-    }
+    // Authenticate user
+    let user = crate::oauth::User::authenticate(&state.db.pool, &username, &password)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let user = match user {
+        Some(u) => u,
+        None => {
+            // Build error URL
+            let error_url = format!(
+                "/oauth/authorize?client_id={}&redirect_uri={}&state={}&code_challenge={}&scope={}&error=invalid_credentials",
+                urlencoding::encode(&client_id),
+                urlencoding::encode(&redirect_uri),
+                urlencoding::encode(&state_param),
+                urlencoding::encode(&code_challenge),
+                urlencoding::encode(&params.get("scope").cloned().unwrap_or_default())
+            );
+            return Ok(axum::response::Redirect::to(&error_url));
+        }
+    };
 
     // Generate authorization code
     let code = uuid::Uuid::new_v4().to_string();
@@ -346,7 +528,7 @@ async fn oauth_authorize_post_handler(
     )
     .bind(&code)
     .bind(&client_id)
-    .bind(&username)
+    .bind(&user.username)
     .bind(&redirect_uri)
     .bind(params.get("scope").cloned().unwrap_or_default())
     .bind(&expires)
@@ -362,7 +544,7 @@ async fn oauth_authorize_post_handler(
         redirect_uri, separator, code, state_param
     );
 
-    tracing::info!(client_id = %client_id, username = %username, "OAuth authorization granted");
+    tracing::info!(client_id = %client_id, username = %user.username, "OAuth authorization granted");
 
     Ok(axum::response::Redirect::to(&redirect_url))
 }
@@ -523,9 +705,12 @@ pub async fn start_http_server(
     let public_routes = Router::new()
         .route("/health", get(health_handler))
         .route("/.well-known/oauth-authorization-server", get(oauth_metadata_handler))
+        .route("/.well-known/oauth-protected-resource", get(protected_resource_metadata_handler))
+        .route("/mcp", get(protected_resource_metadata_handler))  // VS Code checks this
         .route("/oauth/authorize", get(oauth_authorize_handler).post(oauth_authorize_post_handler))
         .route("/oauth/register", post(oauth_register_handler))
         .route("/oauth/token", post(oauth_token_handler))
+        .route("/auth/register", get(register_page_handler).post(user_register_handler))
         .route("/admin/keys", post(crate::admin::create_key).get(crate::admin::list_keys))
         .route("/admin/keys/{key_id}", delete(crate::admin::delete_key))
         .route("/admin/keys/{key_id}/deactivate", delete(crate::admin::deactivate_key))

@@ -71,6 +71,17 @@ pub struct OAuthProvider {
     pub created_at: String,
 }
 
+/// User account for local authentication
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct User {
+    pub id: i64,
+    pub username: String,
+    pub password_hash: String,
+    pub email: Option<String>,
+    pub is_active: bool,
+    pub created_at: String,
+}
+
 /// RFC 8414 - OAuth Server Metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthServerMetadata {
@@ -174,6 +185,15 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             client_id TEXT NOT NULL,
             scope TEXT,
             expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            email TEXT,
+            is_active INTEGER DEFAULT 1,
             created_at TEXT NOT NULL
         );
         "#,
@@ -392,6 +412,76 @@ impl OAuthProvider {
             .execute(pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+}
+
+impl User {
+    /// Hash a password
+    pub fn hash_password(password: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(password.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    /// Verify a password
+    pub fn verify_password(password: &str, hash: &str) -> bool {
+        Self::hash_password(password) == hash
+    }
+
+    /// Create a new user
+    pub async fn create(
+        pool: &SqlitePool,
+        username: &str,
+        password: &str,
+        email: Option<&str>,
+    ) -> Result<Self, sqlx::Error> {
+        let password_hash = Self::hash_password(password);
+        let now = chrono::Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO users (username, password_hash, email, is_active, created_at) VALUES (?, ?, ?, 1, ?)",
+        )
+        .bind(username)
+        .bind(&password_hash)
+        .bind(email)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+
+        Self::get_by_username(pool, username)
+            .await?
+            .ok_or_else(|| sqlx::Error::RowNotFound)
+    }
+
+    /// Get user by username
+    pub async fn get_by_username(pool: &SqlitePool, username: &str) -> Result<Option<Self>, sqlx::Error> {
+        let user = sqlx::query_as::<_, Self>(
+            "SELECT * FROM users WHERE username = ? AND is_active = 1",
+        )
+        .bind(username)
+        .fetch_optional(pool)
+        .await?;
+        Ok(user)
+    }
+
+    /// Authenticate user
+    pub async fn authenticate(
+        pool: &SqlitePool,
+        username: &str,
+        password: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        let user = Self::get_by_username(pool, username).await?;
+        match user {
+            Some(user) => {
+                if Self::verify_password(password, &user.password_hash) {
+                    Ok(Some(user))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
     }
 }
 
