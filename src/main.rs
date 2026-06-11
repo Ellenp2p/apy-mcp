@@ -7,6 +7,8 @@ mod http;
 mod mcp;
 mod oauth;
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use rmcp::transport::stdio;
@@ -61,9 +63,41 @@ enum Commands {
         #[arg(long)]
         github_client_secret: Option<String>,
 
-        /// OAuth redirect URI (e.g., "http://localhost:3000/auth/github/callback")
+        /// Google OAuth Client ID (optional, or set GOOGLE_CLIENT_ID env var)
         #[arg(long)]
-        redirect_uri: Option<String>,
+        google_client_id: Option<String>,
+
+        /// Google OAuth Client Secret (optional, or set GOOGLE_CLIENT_SECRET env var)
+        #[arg(long)]
+        google_client_secret: Option<String>,
+
+        /// Custom OAuth Provider Name (optional, or set CUSTOM_OAUTH_PROVIDER env var)
+        #[arg(long)]
+        custom_oauth_provider: Option<String>,
+
+        /// Custom OAuth Client ID (optional, or set CUSTOM_OAUTH_CLIENT_ID env var)
+        #[arg(long)]
+        custom_oauth_client_id: Option<String>,
+
+        /// Custom OAuth Client Secret (optional, or set CUSTOM_OAUTH_CLIENT_SECRET env var)
+        #[arg(long)]
+        custom_oauth_client_secret: Option<String>,
+
+        /// Custom OAuth Auth URL (optional, or set CUSTOM_OAUTH_AUTH_URL env var)
+        #[arg(long)]
+        custom_oauth_auth_url: Option<String>,
+
+        /// Custom OAuth Token URL (optional, or set CUSTOM_OAUTH_TOKEN_URL env var)
+        #[arg(long)]
+        custom_oauth_token_url: Option<String>,
+
+        /// Custom OAuth User Info URL (optional, or set CUSTOM_OAUTH_USER_INFO_URL env var)
+        #[arg(long)]
+        custom_oauth_user_info_url: Option<String>,
+
+        /// Custom OAuth Scopes (optional, or set CUSTOM_OAUTH_SCOPES env var, comma-separated)
+        #[arg(long)]
+        custom_oauth_scopes: Option<String>,
     },
     /// Manage API keys (admin CLI)
     Admin {
@@ -120,6 +154,113 @@ enum AdminCommands {
     },
 }
 
+/// Build OAuth config from CLI args and environment variables
+fn build_oauth_config(
+    addr: &std::net::SocketAddr,
+    github_client_id: Option<String>,
+    github_client_secret: Option<String>,
+    google_client_id: Option<String>,
+    google_client_secret: Option<String>,
+    custom_oauth_provider: Option<String>,
+    custom_oauth_client_id: Option<String>,
+    custom_oauth_client_secret: Option<String>,
+    custom_oauth_auth_url: Option<String>,
+    custom_oauth_token_url: Option<String>,
+    custom_oauth_user_info_url: Option<String>,
+    custom_oauth_scopes: Option<String>,
+) -> Option<oauth::OAuthConfig> {
+    let mut providers = HashMap::new();
+    let base_url = format!("http://localhost:{}", addr.port());
+
+    // GitHub OAuth
+    let github_id = github_client_id.or_else(|| std::env::var("GITHUB_CLIENT_ID").ok());
+    let github_secret = github_client_secret.or_else(|| std::env::var("GITHUB_CLIENT_SECRET").ok());
+
+    if let (Some(id), Some(secret)) = (github_id, github_secret) {
+        tracing::info!(client_id = %id, "GitHub OAuth configured");
+        providers.insert(
+            "github".to_string(),
+            oauth::OAuthProviderConfig {
+                name: "github".to_string(),
+                client_id: id,
+                client_secret: secret,
+                auth_url: "https://github.com/login/oauth/authorize".to_string(),
+                token_url: "https://github.com/login/oauth/access_token".to_string(),
+                user_info_url: "https://api.github.com/user".to_string(),
+                scopes: vec!["read:user".to_string(), "user:email".to_string()],
+            },
+        );
+    }
+
+    // Google OAuth
+    let google_id = google_client_id.or_else(|| std::env::var("GOOGLE_CLIENT_ID").ok());
+    let google_secret = google_client_secret.or_else(|| std::env::var("GOOGLE_CLIENT_SECRET").ok());
+
+    if let (Some(id), Some(secret)) = (google_id, google_secret) {
+        tracing::info!(client_id = %id, "Google OAuth configured");
+        providers.insert(
+            "google".to_string(),
+            oauth::OAuthProviderConfig {
+                name: "google".to_string(),
+                client_id: id,
+                client_secret: secret,
+                auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+                token_url: "https://oauth2.googleapis.com/token".to_string(),
+                user_info_url: "https://www.googleapis.com/oauth2/v3/userinfo".to_string(),
+                scopes: vec![
+                    "openid".to_string(),
+                    "email".to_string(),
+                    "profile".to_string(),
+                ],
+            },
+        );
+    }
+
+    // Custom OAuth Provider
+    let custom_id = custom_oauth_client_id.or_else(|| std::env::var("CUSTOM_OAUTH_CLIENT_ID").ok());
+    let custom_secret =
+        custom_oauth_client_secret.or_else(|| std::env::var("CUSTOM_OAUTH_CLIENT_SECRET").ok());
+    let custom_name = custom_oauth_provider.or_else(|| std::env::var("CUSTOM_OAUTH_PROVIDER").ok());
+    let custom_auth = custom_oauth_auth_url.or_else(|| std::env::var("CUSTOM_OAUTH_AUTH_URL").ok());
+    let custom_token =
+        custom_oauth_token_url.or_else(|| std::env::var("CUSTOM_OAUTH_TOKEN_URL").ok());
+    let custom_user = custom_oauth_user_info_url
+        .or_else(|| std::env::var("CUSTOM_OAUTH_USER_INFO_URL").ok());
+    let custom_scopes = custom_oauth_scopes.or_else(|| std::env::var("CUSTOM_OAUTH_SCOPES").ok());
+
+    if let (Some(name), Some(id), Some(secret), Some(auth), Some(token), Some(user)) =
+        (custom_name, custom_id, custom_secret, custom_auth, custom_token, custom_user)
+    {
+        let scopes = custom_scopes
+            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
+            .unwrap_or_default();
+
+        tracing::info!(provider = %name, client_id = %id, "Custom OAuth configured");
+        providers.insert(
+            name.clone(),
+            oauth::OAuthProviderConfig {
+                name,
+                client_id: id,
+                client_secret: secret,
+                auth_url: auth,
+                token_url: token,
+                user_info_url: user,
+                scopes,
+            },
+        );
+    }
+
+    if providers.is_empty() {
+        tracing::info!("No OAuth providers configured (set GITHUB_CLIENT_ID, GOOGLE_CLIENT_ID, or CUSTOM_OAUTH_* to enable)");
+        None
+    } else {
+        Some(oauth::OAuthConfig {
+            providers,
+            base_url,
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging (writes to stderr so it doesn't interfere with MCP stdio)
@@ -148,7 +289,15 @@ async fn main() -> Result<()> {
             pool_id,
             github_client_id,
             github_client_secret,
-            redirect_uri,
+            google_client_id,
+            google_client_secret,
+            custom_oauth_provider,
+            custom_oauth_client_id,
+            custom_oauth_client_secret,
+            custom_oauth_auth_url,
+            custom_oauth_token_url,
+            custom_oauth_user_info_url,
+            custom_oauth_scopes,
         } => {
             tracing::info!("Starting apy-mcp server in HTTP mode");
 
@@ -172,24 +321,21 @@ async fn main() -> Result<()> {
             // Fall back to environment variable if not provided via CLI
             let admin_token = admin_token.or_else(|| std::env::var("ADMIN_TOKEN").ok());
 
-            // OAuth config (optional)
-            let oauth_config = if let (Some(client_id), Some(client_secret)) = (
-                github_client_id.or_else(|| std::env::var("GITHUB_CLIENT_ID").ok()),
-                github_client_secret.or_else(|| std::env::var("GITHUB_CLIENT_SECRET").ok()),
-            ) {
-                let redirect = redirect_uri.unwrap_or_else(|| {
-                    format!("http://localhost:{}/auth/github/callback", addr.port())
-                });
-                tracing::info!(client_id = %client_id, redirect_uri = %redirect, "GitHub OAuth configured");
-                Some(oauth::OAuthConfig {
-                    github_client_id: client_id,
-                    github_client_secret: client_secret,
-                    redirect_uri: redirect,
-                })
-            } else {
-                tracing::info!("GitHub OAuth not configured (set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET to enable)");
-                None
-            };
+            // Build OAuth config
+            let oauth_config = build_oauth_config(
+                &addr,
+                github_client_id,
+                github_client_secret,
+                google_client_id,
+                google_client_secret,
+                custom_oauth_provider,
+                custom_oauth_client_id,
+                custom_oauth_client_secret,
+                custom_oauth_auth_url,
+                custom_oauth_token_url,
+                custom_oauth_user_info_url,
+                custom_oauth_scopes,
+            );
 
             http::start_http_server(addr, tools, db, admin_token, oauth_config).await?;
         }
