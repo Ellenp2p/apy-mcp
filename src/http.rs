@@ -4,7 +4,7 @@ use axum::{
     Router,
     body::Body,
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -15,6 +15,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager,
 };
 use tower_service::Service;
+use tower_http::cors::{CorsLayer, Any};
 
 use crate::{db::Database, mcp::tools::ApyMcpTools};
 
@@ -237,10 +238,16 @@ pub async fn start_http_server(
             auth_middleware,
         ));
 
-    // Combine all routes
+    // Combine all routes with CORS
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers(Any);
+
     let app = Router::new()
         .merge(public_routes)
         .merge(mcp_routes)
+        .layer(cors)
         .with_state(state);
 
     tracing::info!("Starting HTTP server on {}", addr);
