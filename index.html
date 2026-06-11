@@ -401,6 +401,7 @@
 
         <div class="tabs">
             <div class="tab active" data-tab="keys">API Keys</div>
+            <div class="tab" data-tab="oauth">OAuth Providers</div>
             <div class="tab" data-tab="stats">使用统计</div>
             <div class="tab" data-tab="guide">使用指南</div>
         </div>
@@ -413,6 +414,19 @@
                     <button class="btn btn-primary" onclick="showCreateModal()">+ 创建 Key</button>
                 </div>
                 <div id="keysList">
+                    <div class="empty-state">请先连接到服务器</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- OAuth Providers Tab -->
+        <div class="tab-content hidden" id="tab-oauth">
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">OAuth Providers</div>
+                    <button class="btn btn-primary" onclick="showCreateOAuthModal()">+ 添加 Provider</button>
+                </div>
+                <div id="oauthList">
                     <div class="empty-state">请先连接到服务器</div>
                 </div>
             </div>
@@ -518,10 +532,61 @@
         </div>
     </div>
 
+    <!-- Create OAuth Provider Modal -->
+    <div class="modal" id="createOAuthModal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <div class="card-title">添加 OAuth Provider</div>
+                <button class="modal-close" onclick="closeCreateOAuthModal()">&times;</button>
+            </div>
+            <div class="form-group">
+                <label>Provider 名称 *</label>
+                <input type="text" id="oauthName" placeholder="如: github, google, keycloak">
+            </div>
+            <div class="form-group">
+                <label>Issuer URL (动态注册，RFC 7591)</label>
+                <input type="text" id="oauthIssuer" placeholder="如: https://github.com (支持自动发现的填写此项)">
+                <p style="font-size: 12px; color: var(--muted); margin-top: 4px;">填写后会自动发现端点并注册客户端</p>
+            </div>
+            <div style="text-align: center; color: var(--muted); margin: 16px 0;">— 或者手动配置 —</div>
+            <div class="form-group">
+                <label>Auth URL</label>
+                <input type="text" id="oauthAuthUrl" placeholder="如: https://github.com/login/oauth/authorize">
+            </div>
+            <div class="form-group">
+                <label>Token URL</label>
+                <input type="text" id="oauthTokenUrl" placeholder="如: https://github.com/login/oauth/access_token">
+            </div>
+            <div class="form-group">
+                <label>User Info URL</label>
+                <input type="text" id="oauthUserInfoUrl" placeholder="如: https://api.github.com/user">
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Client ID</label>
+                    <input type="text" id="oauthClientId" placeholder="OAuth Client ID">
+                </div>
+                <div class="form-group">
+                    <label>Client Secret</label>
+                    <input type="password" id="oauthClientSecret" placeholder="OAuth Client Secret">
+                </div>
+            </div>
+            <div class="form-group">
+                <label>Scopes (逗号分隔)</label>
+                <input type="text" id="oauthScopes" placeholder="如: read:user,user:email">
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                <button class="btn" style="background: var(--border);" onclick="closeCreateOAuthModal()">取消</button>
+                <button class="btn btn-primary" onclick="createOAuthProvider()">添加</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let serverUrl = '';
         let adminToken = '';
         let keys = [];
+        let oauthProviders = [];
 
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
@@ -561,6 +626,7 @@
                     document.getElementById('statusDot').classList.add('connected');
                     document.getElementById('statusText').textContent = '已连接';
                     await loadKeys();
+                    await loadOAuthProviders();
                     showToast('连接成功', 'success');
                 } else {
                     throw new Error('Health check failed');
@@ -654,6 +720,223 @@
                 }
             } catch (error) {
                 console.error('Failed to load stats:', error);
+            }
+        }
+
+        // ── OAuth Providers ──────────────────────────────────────────────
+
+        async function loadOAuthProviders() {
+            try {
+                const response = await fetch(serverUrl + '/admin/oauth/providers', {
+                    headers: {
+                        'Authorization': 'Bearer ' + adminToken
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    oauthProviders = data.providers || [];
+                    renderOAuthProviders();
+                }
+            } catch (error) {
+                console.error('Failed to load OAuth providers:', error);
+            }
+        }
+
+        function renderOAuthProviders() {
+            const container = document.getElementById('oauthList');
+
+            if (oauthProviders.length === 0) {
+                container.innerHTML = '<div class="empty-state">暂无 OAuth Provider<br><br>点击"添加 Provider"开始配置</div>';
+                return;
+            }
+
+            container.innerHTML = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>名称</th>
+                            <th>Issuer</th>
+                            <th>Client ID</th>
+                            <th>类型</th>
+                            <th>状态</th>
+                            <th>登录链接</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${oauthProviders.map(p => `
+                            <tr>
+                                <td><strong>${escapeHtml(p.name)}</strong></td>
+                                <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(p.issuer || '-')}</td>
+                                <td><code style="background: var(--bg); padding: 2px 6px; border-radius: 4px; font-size: 12px;">${p.client_id ? escapeHtml(p.client_id.substring(0, 8) + '...') : '-'}</code></td>
+                                <td>
+                                    <span class="badge ${p.is_dynamic ? 'badge-success' : ''}" style="${!p.is_dynamic ? 'background: rgba(108, 92, 231, 0.15); color: var(--accent);' : ''}">
+                                        ${p.is_dynamic ? '动态注册' : '手动配置'}
+                                    </span>
+                                </td>
+                                <td>
+                                    <span class="badge ${p.is_active ? 'badge-success' : 'badge-danger'}">
+                                        ${p.is_active ? '活跃' : '已禁用'}
+                                    </span>
+                                </td>
+                                <td>
+                                    <a href="${serverUrl}/auth/${escapeHtml(p.name)}" target="_blank" style="color: var(--accent); text-decoration: none;">
+                                        /auth/${escapeHtml(p.name)}
+                                    </a>
+                                </td>
+                                <td>
+                                    <div class="actions">
+                                        ${p.is_active ?
+                                            `<button class="btn btn-small btn-danger" onclick="deactivateOAuth(${p.id})">禁用</button>` :
+                                            `<button class="btn btn-small btn-primary" onclick="reactivateOAuth(${p.id})">启用</button>`
+                                        }
+                                        <button class="btn btn-small btn-danger" onclick="deleteOAuth(${p.id})">删除</button>
+                                    </div>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        function showCreateOAuthModal() {
+            if (!serverUrl) {
+                showToast('请先连接到服务器', 'error');
+                return;
+            }
+            document.getElementById('createOAuthModal').classList.add('active');
+        }
+
+        function closeCreateOAuthModal() {
+            document.getElementById('createOAuthModal').classList.remove('active');
+            // Clear form
+            document.getElementById('oauthName').value = '';
+            document.getElementById('oauthIssuer').value = '';
+            document.getElementById('oauthAuthUrl').value = '';
+            document.getElementById('oauthTokenUrl').value = '';
+            document.getElementById('oauthUserInfoUrl').value = '';
+            document.getElementById('oauthClientId').value = '';
+            document.getElementById('oauthClientSecret').value = '';
+            document.getElementById('oauthScopes').value = '';
+        }
+
+        async function createOAuthProvider() {
+            const name = document.getElementById('oauthName').value.trim();
+            const issuer = document.getElementById('oauthIssuer').value.trim();
+            const authUrl = document.getElementById('oauthAuthUrl').value.trim();
+            const tokenUrl = document.getElementById('oauthTokenUrl').value.trim();
+            const userInfoUrl = document.getElementById('oauthUserInfoUrl').value.trim();
+            const clientId = document.getElementById('oauthClientId').value.trim();
+            const clientSecret = document.getElementById('oauthClientSecret').value.trim();
+            const scopes = document.getElementById('oauthScopes').value.trim();
+
+            if (!name) {
+                showToast('请输入 Provider 名称', 'error');
+                return;
+            }
+
+            // Check if dynamic or manual
+            const isDynamic = issuer && !authUrl;
+
+            if (!isDynamic && (!authUrl || !tokenUrl || !clientId || !clientSecret)) {
+                showToast('手动配置需要填写 Auth URL、Token URL、Client ID 和 Client Secret', 'error');
+                return;
+            }
+
+            const body = { name };
+            if (isDynamic) {
+                body.issuer = issuer;
+            } else {
+                body.auth_url = authUrl;
+                body.token_url = tokenUrl;
+                body.user_info_url = userInfoUrl || null;
+                body.client_id = clientId;
+                body.client_secret = clientSecret;
+            }
+            if (scopes) {
+                body.scopes = scopes;
+            }
+
+            try {
+                const response = await fetch(serverUrl + '/admin/oauth/providers', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + adminToken
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                if (response.ok) {
+                    showToast('Provider 添加成功', 'success');
+                    closeCreateOAuthModal();
+                    await loadOAuthProviders();
+                } else {
+                    const error = await response.text();
+                    showToast('添加失败: ' + error, 'error');
+                }
+            } catch (error) {
+                showToast('添加失败: ' + error.message, 'error');
+            }
+        }
+
+        async function deleteOAuth(id) {
+            if (!confirm('确定要删除此 OAuth Provider 吗？')) return;
+
+            try {
+                const response = await fetch(serverUrl + '/admin/oauth/providers/' + id, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': 'Bearer ' + adminToken
+                    }
+                });
+
+                if (response.ok) {
+                    showToast('已删除', 'success');
+                    await loadOAuthProviders();
+                }
+            } catch (error) {
+                showToast('删除失败: ' + error.message, 'error');
+            }
+        }
+
+        async function deactivateOAuth(id) {
+            if (!confirm('确定要禁用此 OAuth Provider 吗？')) return;
+
+            try {
+                const response = await fetch(serverUrl + '/admin/oauth/providers/' + id + '/deactivate', {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': 'Bearer ' + adminToken
+                    }
+                });
+
+                if (response.ok) {
+                    showToast('已禁用', 'success');
+                    await loadOAuthProviders();
+                }
+            } catch (error) {
+                showToast('操作失败: ' + error.message, 'error');
+            }
+        }
+
+        async function reactivateOAuth(id) {
+            try {
+                const response = await fetch(serverUrl + '/admin/oauth/providers/' + id + '/reactivate', {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': 'Bearer ' + adminToken
+                    }
+                });
+
+                if (response.ok) {
+                    showToast('已启用', 'success');
+                    await loadOAuthProviders();
+                }
+            } catch (error) {
+                showToast('操作失败: ' + error.message, 'error');
             }
         }
 
