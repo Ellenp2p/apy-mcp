@@ -6,11 +6,18 @@ description = "MCP server for DeFi lending rate aggregation across multiple chai
 
 [dependencies]
 # MCP server (latest version with server_handler support)
-rmcp = { version = "1.7", features = ["server", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server", "server-side-http", "tower"] }
 rmcp-macros = "1.7"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+
+# HTTP server (axum)
+axum = { version = "0.8", features = ["http1", "tokio"] }
+tower = "0.5"
+tower-service = "0.3"
+http-body-util = "0.1"
+bytes = "1"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -42,3 +49,19 @@ chrono = "0.4"
 # Async trait
 async-trait = "0.1"
 stellar-strkey = "0.0.16"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Database (SQLite for API key storage)
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid"] }
+
+# UUID generation for API keys
+uuid = { version = "1", features = ["v4"] }
+
+# Rate limiting
+governor = "0.8"
+
+# Password hashing for admin tokens
+sha2 = "0.10"
+hex = "0.4"

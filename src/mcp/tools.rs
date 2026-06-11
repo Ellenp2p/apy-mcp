@@ -24,6 +24,12 @@ pub struct AddPoolParams {
     pub pool_id: String,
 }
 
+/// Request metadata (custom headers, etc.)
+#[derive(Debug, Clone)]
+pub struct RequestMetadata {
+    pub custom_headers: Vec<(String, String)>,
+}
+
 // ── Tool router ──────────────────────────────────────────────────────
 
 /// Shared state across tool invocations
@@ -57,7 +63,23 @@ impl ApyMcpTools {
         description = "Query lending/borrowing interest rates for a Blend Capital pool on Stellar. \
         Returns per-asset supply APY, borrow APY, utilization, and total supplied/borrowed amounts."
     )]
-    async fn get_blend_rates(&self, Parameters(params): Parameters<GetBlendRatesParams>) -> String {
+    async fn get_blend_rates(
+        &self,
+        Parameters(params): Parameters<GetBlendRatesParams>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> String {
+        // Log custom headers if present
+        if let Some(metadata) = ctx.extensions.get::<RequestMetadata>() {
+            if !metadata.custom_headers.is_empty() {
+                tracing::info!(
+                    tool = "get_blend_rates",
+                    pool_id = %params.pool_id,
+                    custom_headers = ?metadata.custom_headers,
+                    "Tool called with custom headers"
+                );
+            }
+        }
+
         match self
             .state
             .blend_provider
@@ -76,7 +98,21 @@ impl ApyMcpTools {
         description = "Get lending/borrowing rates for all monitored DeFi pools across all chains. \
         Returns a summary of all pools with their current interest rates."
     )]
-    async fn get_all_rates(&self) -> String {
+    async fn get_all_rates(
+        &self,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> String {
+        // Log custom headers if present
+        if let Some(metadata) = ctx.extensions.get::<RequestMetadata>() {
+            if !metadata.custom_headers.is_empty() {
+                tracing::info!(
+                    tool = "get_all_rates",
+                    custom_headers = ?metadata.custom_headers,
+                    "Tool called with custom headers"
+                );
+            }
+        }
+
         let pools = self.state.monitored_pools.read().await;
         let mut results = Vec::new();
 
@@ -100,7 +136,24 @@ impl ApyMcpTools {
 
     #[tool(description = "Add a DeFi lending pool to the monitoring list. \
         Currently supports Stellar Blend pools. More chains will be added.")]
-    async fn add_pool(&self, Parameters(params): Parameters<AddPoolParams>) -> String {
+    async fn add_pool(
+        &self,
+        Parameters(params): Parameters<AddPoolParams>,
+        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> String {
+        // Log custom headers if present
+        if let Some(metadata) = ctx.extensions.get::<RequestMetadata>() {
+            if !metadata.custom_headers.is_empty() {
+                tracing::info!(
+                    tool = "add_pool",
+                    chain = %params.chain,
+                    pool_id = %params.pool_id,
+                    custom_headers = ?metadata.custom_headers,
+                    "Tool called with custom headers"
+                );
+            }
+        }
+
         match params.chain.as_str() {
             "stellar" => {
                 let mut pools = self.state.monitored_pools.write().await;
