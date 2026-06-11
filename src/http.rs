@@ -236,6 +236,165 @@ async fn health_handler() -> impl IntoResponse {
     )
 }
 
+/// RFC 8414 - OAuth Server Metadata Discovery
+/// VS Code and other MCP clients use this to discover OAuth endpoints
+async fn oauth_metadata_handler(
+    State(state): State<HttpState>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    let base_url = "http://localhost:3000"; // TODO: make configurable
+
+    Ok(axum::Json(serde_json::json!({
+        "issuer": base_url,
+        "authorization_endpoint": format!("{}/oauth/authorize", base_url),
+        "token_endpoint": format!("{}/oauth/token", base_url),
+        "registration_endpoint": format!("{}/oauth/register", base_url),
+        "scopes_supported": ["openid", "profile", "email"],
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_methods_supported": ["client_secret_post", "client_secret_basic"],
+        "service_documentation": "https://github.com/Ellenp2p/apy-mcp",
+        "code_challenge_methods_supported": ["S256"]
+    })))
+}
+
+/// RFC 7591 - Dynamic Client Registration
+async fn oauth_register_handler(
+    State(state): State<HttpState>,
+    axum::extract::Json(req): axum::extract::Json<serde_json::Value>,
+) -> Result<(StatusCode, axum::Json<serde_json::Value>), StatusCode> {
+    use sha2::{Digest, Sha256};
+
+    // Generate client credentials
+    let client_id = format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let client_secret_raw = uuid::Uuid::new_v4().to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(client_secret_raw.as_bytes());
+    let client_secret_hash = hex::encode(hasher.finalize());
+
+    // Extract redirect URIs from request
+    let redirect_uris: Vec<String> = req["redirect_uris"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+
+    let client_name = req["client_name"]
+        .as_str()
+        .unwrap_or("MCP Client");
+
+    // Store in database
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&client_id)
+    .bind(&client_secret_hash)
+    .bind(client_name)
+    .bind(serde_json::to_string(&redirect_uris).unwrap_or_default())
+    .bind(&now)
+    .execute(&state.db.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tracing::info!(client_id = %client_id, client_name = %client_name, "OAuth client registered");
+
+    // Return credentials (client_secret shown once)
+    Ok((
+        StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "client_id": client_id,
+            "client_secret": client_secret_raw,
+            "client_name": client_name,
+            "redirect_uris": redirect_uris,
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "client_secret_post"
+        })),
+    ))
+}
+
+/// OAuth Token endpoint
+async fn oauth_token_handler(
+    State(state): State<HttpState>,
+    axum::extract::Form(params): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    let grant_type = params.get("grant_type").ok_or(StatusCode::BAD_REQUEST)?;
+
+    match grant_type.as_str() {
+        "authorization_code" => {
+            let code = params.get("code").ok_or(StatusCode::BAD_REQUEST)?;
+            let client_id = params.get("client_id").ok_or(StatusCode::BAD_REQUEST)?;
+            let client_secret = params.get("client_secret").ok_or(StatusCode::BAD_REQUEST)?;
+
+            // Validate client credentials
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(client_secret.as_bytes());
+            let secret_hash = hex::encode(hasher.finalize());
+
+            let client = sqlx::query_as::<_, (String, String)>(
+                "SELECT client_id, client_secret FROM oauth_clients WHERE client_id = ? AND client_secret = ?",
+            )
+            .bind(client_id)
+            .bind(&secret_hash)
+            .fetch_optional(&state.db.pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            if client.is_none() {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+
+            // Validate authorization code
+            let auth_code = sqlx::query_as::<_, (String, String, String)>(
+                "SELECT code, client_id, user_id FROM oauth_authorization_codes WHERE code = ? AND client_id = ? AND expires_at > ?",
+            )
+            .bind(code)
+            .bind(client_id)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .fetch_optional(&state.db.pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            match auth_code {
+                Some((_, _, user_id)) => {
+                    // Delete used code
+                    sqlx::query("DELETE FROM oauth_authorization_codes WHERE code = ?")
+                        .bind(code)
+                        .execute(&state.db.pool)
+                        .await
+                        .ok();
+
+                    // Generate access token
+                    let access_token = format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+
+                    // Store access token
+                    sqlx::query(
+                        "INSERT INTO oauth_access_tokens (token, user_id, client_id, expires_at) VALUES (?, ?, ?, ?)",
+                    )
+                    .bind(&access_token)
+                    .bind(&user_id)
+                    .bind(client_id)
+                    .bind((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339())
+                    .execute(&state.db.pool)
+                    .await
+                    .ok();
+
+                    Ok(axum::Json(serde_json::json!({
+                        "access_token": access_token,
+                        "token_type": "Bearer",
+                        "expires_in": 3600
+                    })))
+                }
+                None => Err(StatusCode::UNAUTHORIZED),
+            }
+        }
+        _ => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
 /// Start the HTTP server
 pub async fn start_http_server(
     addr: SocketAddr,
@@ -253,6 +412,9 @@ pub async fn start_http_server(
     // Build public routes (no auth needed)
     let public_routes = Router::new()
         .route("/health", get(health_handler))
+        .route("/.well-known/oauth-authorization-server", get(oauth_metadata_handler))
+        .route("/oauth/register", post(oauth_register_handler))
+        .route("/oauth/token", post(oauth_token_handler))
         .route("/admin/keys", post(crate::admin::create_key).get(crate::admin::list_keys))
         .route("/admin/keys/{key_id}", delete(crate::admin::delete_key))
         .route("/admin/keys/{key_id}/deactivate", delete(crate::admin::deactivate_key))

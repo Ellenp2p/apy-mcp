@@ -149,6 +149,33 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             last_login TEXT NOT NULL,
             PRIMARY KEY (id, provider)
         );
+
+        CREATE TABLE IF NOT EXISTS oauth_clients (
+            client_id TEXT PRIMARY KEY,
+            client_secret TEXT NOT NULL,
+            client_name TEXT NOT NULL,
+            redirect_uris TEXT DEFAULT '[]',
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+            code TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            redirect_uri TEXT,
+            scope TEXT,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            scope TEXT,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         "#,
     )
     .execute(pool)
