@@ -17,7 +17,7 @@ use rmcp::transport::streamable_http_server::{
 use tower_service::Service;
 use tower_http::cors::{CorsLayer, Any};
 
-use crate::{db::Database, mcp::tools::ApyMcpTools};
+use crate::{db::Database, mcp::tools::ApyMcpTools, oauth::OAuthConfig};
 
 /// Rate limiter entry
 #[derive(Debug, Clone)]
@@ -95,7 +95,39 @@ async fn auth_middleware(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Validate API key
+    // First, check if it's a GitHub OAuth token
+    let github_user = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT id, login, name, email, avatar_url FROM github_users WHERE access_token = ?",
+    )
+    .bind(raw_key)
+    .fetch_optional(&state.db.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some((_id, login, _name, _email, _avatar)) = github_user {
+        // GitHub OAuth token is valid, allow request
+        tracing::debug!(login = %login, "GitHub OAuth token validated");
+
+        // Extract custom headers for logging
+        let custom_headers = extract_custom_headers(&headers);
+        if !custom_headers.is_empty() {
+            tracing::info!(
+                github_user = %login,
+                custom_headers = ?custom_headers,
+                "MCP request with custom headers (OAuth)"
+            );
+        }
+
+        request
+            .extensions_mut()
+            .insert(crate::mcp::tools::RequestMetadata {
+                custom_headers,
+            });
+
+        return Ok(next.run(request).await);
+    }
+
+    // Not a GitHub token, try API key
     let api_key = state
         .db
         .validate_key(raw_key)
@@ -210,6 +242,7 @@ pub async fn start_http_server(
     tools: ApyMcpTools,
     db: Database,
     admin_token: Option<String>,
+    oauth_config: Option<OAuthConfig>,
 ) -> anyhow::Result<()> {
     let state = HttpState {
         tools,
@@ -217,9 +250,6 @@ pub async fn start_http_server(
         admin_token: admin_token.clone(),
         rate_limiters: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
-
-    // Build admin routes (no auth middleware - they handle auth internally)
-    let _admin_routes = crate::admin::admin_routes();
 
     // Build public routes (no auth needed)
     let public_routes = Router::new()
@@ -238,17 +268,31 @@ pub async fn start_http_server(
             auth_middleware,
         ));
 
+    // Build OAuth routes if configured
+    let oauth_routes = crate::oauth::oauth_router_without_state();
+    let oauth_callback_routes = if let Some(config) = oauth_config {
+        Some(crate::oauth::oauth_callback_router(config, db.pool.clone()))
+    } else {
+        None
+    };
+
     // Combine all routes with CORS
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
-    let app = Router::new()
+    let mut app = Router::new()
         .merge(public_routes)
         .merge(mcp_routes)
+        .merge(oauth_routes)
         .layer(cors)
         .with_state(state);
+
+    // Add OAuth callback routes if configured (different state type)
+    if let Some(callback_routes) = oauth_callback_routes {
+        app = app.merge(callback_routes);
+    }
 
     tracing::info!("Starting HTTP server on {}", addr);
     if admin_token.is_some() {

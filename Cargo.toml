@@ -6,7 +6,7 @@ description = "MCP server for DeFi lending rate aggregation across multiple chai
 
 [dependencies]
 # MCP server (latest version with server_handler support)
-rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server", "server-side-http", "tower"] }
+rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server", "server-side-http", "tower", "auth"] }
 rmcp-macros = "1.7"
 
 # Async runtime
@@ -66,3 +66,6 @@ governor = "0.8"
 # Password hashing for admin tokens
 sha2 = "0.10"
 hex = "0.4"
+
+# URL encoding
+urlencoding = "2"

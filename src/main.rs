@@ -5,6 +5,7 @@ mod chains;
 mod db;
 mod http;
 mod mcp;
+mod oauth;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -51,6 +52,18 @@ enum Commands {
         /// Default Blend pool ID
         #[arg(long, default_value = DEFAULT_BLEND_POOL)]
         pool_id: String,
+
+        /// GitHub OAuth Client ID (optional, or set GITHUB_CLIENT_ID env var)
+        #[arg(long)]
+        github_client_id: Option<String>,
+
+        /// GitHub OAuth Client Secret (optional, or set GITHUB_CLIENT_SECRET env var)
+        #[arg(long)]
+        github_client_secret: Option<String>,
+
+        /// OAuth redirect URI (e.g., "http://localhost:3000/auth/github/callback")
+        #[arg(long)]
+        redirect_uri: Option<String>,
     },
     /// Manage API keys (admin CLI)
     Admin {
@@ -133,6 +146,9 @@ async fn main() -> Result<()> {
             db_path,
             admin_token,
             pool_id,
+            github_client_id,
+            github_client_secret,
+            redirect_uri,
         } => {
             tracing::info!("Starting apy-mcp server in HTTP mode");
 
@@ -146,13 +162,36 @@ async fn main() -> Result<()> {
             let db = db::Database::new(&db_url).await?;
             tracing::info!("Database initialized at {}", db_path);
 
+            // Initialize OAuth tables
+            oauth::init_oauth_db(&db.pool).await?;
+            tracing::info!("OAuth tables initialized");
+
             let tools = ApyMcpTools::new(&pool_id);
             let addr: std::net::SocketAddr = addr.parse()?;
 
             // Fall back to environment variable if not provided via CLI
             let admin_token = admin_token.or_else(|| std::env::var("ADMIN_TOKEN").ok());
 
-            http::start_http_server(addr, tools, db, admin_token).await?;
+            // OAuth config (optional)
+            let oauth_config = if let (Some(client_id), Some(client_secret)) = (
+                github_client_id.or_else(|| std::env::var("GITHUB_CLIENT_ID").ok()),
+                github_client_secret.or_else(|| std::env::var("GITHUB_CLIENT_SECRET").ok()),
+            ) {
+                let redirect = redirect_uri.unwrap_or_else(|| {
+                    format!("http://localhost:{}/auth/github/callback", addr.port())
+                });
+                tracing::info!(client_id = %client_id, redirect_uri = %redirect, "GitHub OAuth configured");
+                Some(oauth::OAuthConfig {
+                    github_client_id: client_id,
+                    github_client_secret: client_secret,
+                    redirect_uri: redirect,
+                })
+            } else {
+                tracing::info!("GitHub OAuth not configured (set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET to enable)");
+                None
+            };
+
+            http::start_http_server(addr, tools, db, admin_token, oauth_config).await?;
         }
         Commands::Admin { command } => match command {
             AdminCommands::CreateKey {

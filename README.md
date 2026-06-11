@@ -12,6 +12,7 @@ Currently supported:
 - Multi-asset pool support (USDC, XLM, EURC, etc.)
 - Backstop rate integration
 - **API Key management** with admin dashboard
+- **GitHub OAuth login** (一键登录)
 - **Rate limiting** per API key
 - **Custom header support** (X-Poke-User-Id, etc.) with logging
 - **SQLite database** for persistent storage
@@ -57,8 +58,12 @@ Add to `claude_desktop_config.json`:
 # With admin token for management
 cargo run -- http --addr 0.0.0.0:3000 --admin-token your-admin-secret
 
-# Or use environment variable
-ADMIN_TOKEN=your-admin-secret cargo run -- http
+# With GitHub OAuth (optional)
+cargo run -- http \
+  --addr 0.0.0.0:3000 \
+  --admin-token your-admin-secret \
+  --github-client-id YOUR_GITHUB_CLIENT_ID \
+  --github-client-secret YOUR_GITHUB_CLIENT_SECRET
 ```
 
 ### Docker
@@ -70,8 +75,18 @@ docker build -t apy-mcp .
 # Run with admin token
 docker run -p 3000:3000 -e ADMIN_TOKEN=your-admin-secret apy-mcp
 
+# Run with GitHub OAuth
+docker run -p 3000:3000 \
+  -e ADMIN_TOKEN=your-admin-secret \
+  -e GITHUB_CLIENT_ID=your_client_id \
+  -e GITHUB_CLIENT_SECRET=your_client_secret \
+  apy-mcp
+
 # Or use docker-compose
-ADMIN_TOKEN=your-admin-secret docker-compose up
+ADMIN_TOKEN=your-admin-secret \
+GITHUB_CLIENT_ID=your_client_id \
+GITHUB_CLIENT_SECRET=your_client_secret \
+docker-compose up
 ```
 
 ### Endpoints
@@ -79,13 +94,52 @@ ADMIN_TOKEN=your-admin-secret docker-compose up
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
 | `/health` | GET | No | Health check |
-| `/mcp` | POST | API Key | MCP Streamable HTTP endpoint |
+| `/mcp` | POST | API Key / OAuth | MCP Streamable HTTP endpoint |
+| `/auth/github` | GET | No | Start GitHub OAuth flow |
+| `/auth/github/callback` | GET | No | GitHub OAuth callback |
+| `/auth/user` | GET | OAuth Token | Get current user info |
 | `/admin/keys` | POST | Admin Token | Create new API key |
 | `/admin/keys` | GET | Admin Token | List all API keys |
 | `/admin/keys/{id}` | DELETE | Admin Token | Delete API key |
 | `/admin/keys/{id}/deactivate` | DELETE | Admin Token | Deactivate API key |
 | `/admin/keys/{id}/reactivate` | POST | Admin Token | Reactivate API key |
 | `/admin/stats` | GET | Admin Token | Usage statistics |
+
+## GitHub OAuth Setup
+
+### 1. Create GitHub OAuth App
+
+1. Go to https://github.com/settings/developers
+2. Click "New OAuth App"
+3. Fill in:
+   - **Application name**: `APY MCP`
+   - **Homepage URL**: `http://localhost:3000` (or your domain)
+   - **Authorization callback URL**: `http://localhost:3000/auth/github/callback`
+4. Save **Client ID** and **Client Secret**
+
+### 2. Run Server with OAuth
+
+```bash
+cargo run -- http \
+  --github-client-id YOUR_CLIENT_ID \
+  --github-client-secret YOUR_CLIENT_SECRET
+```
+
+### 3. Login via OAuth
+
+1. Open `http://localhost:3000/auth/github` in browser
+2. Click "Login with GitHub"
+3. Authorize the app
+4. You'll be redirected back with an access token
+
+### 4. Use OAuth Token
+
+```bash
+curl -X POST http://localhost:3000/mcp \
+  -H "Authorization: Bearer YOUR_GITHUB_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '...'
+```
 
 ## API Key Management
 

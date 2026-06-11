@@ -32,7 +32,7 @@ pub struct ApiKeyStats {
 /// Database manager for API keys
 #[derive(Clone)]
 pub struct Database {
-    pool: SqlitePool,
+    pub pool: SqlitePool,
 }
 
 impl Database {
