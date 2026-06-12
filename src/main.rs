@@ -228,13 +228,18 @@ fn build_oauth_config(
     let custom_auth = custom_oauth_auth_url.or_else(|| std::env::var("CUSTOM_OAUTH_AUTH_URL").ok());
     let custom_token =
         custom_oauth_token_url.or_else(|| std::env::var("CUSTOM_OAUTH_TOKEN_URL").ok());
-    let custom_user = custom_oauth_user_info_url
-        .or_else(|| std::env::var("CUSTOM_OAUTH_USER_INFO_URL").ok());
+    let custom_user =
+        custom_oauth_user_info_url.or_else(|| std::env::var("CUSTOM_OAUTH_USER_INFO_URL").ok());
     let custom_scopes = custom_oauth_scopes.or_else(|| std::env::var("CUSTOM_OAUTH_SCOPES").ok());
 
-    if let (Some(name), Some(id), Some(secret), Some(auth), Some(token), Some(user)) =
-        (custom_name, custom_id, custom_secret, custom_auth, custom_token, custom_user)
-    {
+    if let (Some(name), Some(id), Some(secret), Some(auth), Some(token), Some(user)) = (
+        custom_name,
+        custom_id,
+        custom_secret,
+        custom_auth,
+        custom_token,
+        custom_user,
+    ) {
         let scopes = custom_scopes
             .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
             .unwrap_or_default();

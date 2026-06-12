@@ -1,18 +1,17 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
-    Router,
     extract::{Request, State},
     http::{HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
+    Router,
 };
 use rmcp::transport::streamable_http_server::{
-    StreamableHttpServerConfig, StreamableHttpService,
-    session::local::LocalSessionManager,
+    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
-use tower_http::cors::{CorsLayer, Any};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{db::Database, mcp::tools::ApyMcpTools};
 
@@ -112,9 +111,7 @@ async fn auth_middleware(
         let custom_headers = extract_custom_headers(&headers);
         request
             .extensions_mut()
-            .insert(crate::mcp::tools::RequestMetadata {
-                custom_headers,
-            });
+            .insert(crate::mcp::tools::RequestMetadata { custom_headers });
 
         return Ok(next.run(request).await);
     }
@@ -147,9 +144,7 @@ async fn auth_middleware(
 
         request
             .extensions_mut()
-            .insert(crate::mcp::tools::RequestMetadata {
-                custom_headers,
-            });
+            .insert(crate::mcp::tools::RequestMetadata { custom_headers });
 
         return Ok(next.run(request).await);
     }
@@ -203,9 +198,7 @@ async fn auth_middleware(
     request.extensions_mut().insert(api_key);
     request
         .extensions_mut()
-        .insert(crate::mcp::tools::RequestMetadata {
-            custom_headers,
-        });
+        .insert(crate::mcp::tools::RequestMetadata { custom_headers });
 
     Ok(next.run(request).await)
 }
@@ -354,15 +347,21 @@ async fn user_register_handler(
     let email = req["email"].as_str();
 
     if username.len() < 3 {
-        return Ok((StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
-            "error": "Username must be at least 3 characters"
-        }))));
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": "Username must be at least 3 characters"
+            })),
+        ));
     }
 
     if password.len() < 6 {
-        return Ok((StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({
-            "error": "Password must be at least 6 characters"
-        }))));
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": "Password must be at least 6 characters"
+            })),
+        ));
     }
 
     // Check if user already exists
@@ -371,9 +370,12 @@ async fn user_register_handler(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if existing.is_some() {
-        return Ok((StatusCode::CONFLICT, axum::Json(serde_json::json!({
-            "error": "Username already exists"
-        }))));
+        return Ok((
+            StatusCode::CONFLICT,
+            axum::Json(serde_json::json!({
+                "error": "Username already exists"
+            })),
+        ));
     }
 
     // Create user
@@ -383,11 +385,14 @@ async fn user_register_handler(
 
     tracing::info!(user_id = user.id, username = %username, "User registered");
 
-    Ok((StatusCode::CREATED, axum::Json(serde_json::json!({
-        "id": user.id,
-        "username": user.username,
-        "message": "User registered successfully"
-    }))))
+    Ok((
+        StatusCode::CREATED,
+        axum::Json(serde_json::json!({
+            "id": user.id,
+            "username": user.username,
+            "message": "User registered successfully"
+        })),
+    ))
 }
 
 /// OAuth Authorization endpoint - returns login page
@@ -596,12 +601,14 @@ async fn oauth_register_handler(
     // Extract redirect URIs from request
     let redirect_uris: Vec<String> = req["redirect_uris"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
         .unwrap_or_default();
 
-    let client_name = req["client_name"]
-        .as_str()
-        .unwrap_or("MCP Client");
+    let client_name = req["client_name"].as_str().unwrap_or("MCP Client");
 
     // Store in database
     let now = chrono::Utc::now().to_rfc3339();
@@ -657,7 +664,9 @@ async fn oauth_token_handler(
             {
                 // client_secret_post: credentials in form body
                 (id.clone(), secret.clone())
-            } else if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+            } else if let Some(auth_header) =
+                headers.get("authorization").and_then(|v| v.to_str().ok())
+            {
                 // client_secret_basic: credentials in Authorization header (Base64 encoded)
                 if let Some(basic) = auth_header.strip_prefix("Basic ") {
                     use base64::Engine;
@@ -736,7 +745,8 @@ async fn oauth_token_handler(
                         .ok();
 
                     // Generate access token
-                    let access_token = format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+                    let access_token =
+                        format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
 
                     // Store access token
                     let now = chrono::Utc::now().to_rfc3339();
@@ -784,11 +794,7 @@ async fn static_file_handler() -> impl IntoResponse {
             content,
         )
             .into_response(),
-        Err(_) => (
-            StatusCode::NOT_FOUND,
-            "index.html not found",
-        )
-            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
     }
 }
 
@@ -811,22 +817,58 @@ pub async fn start_http_server(
     // Build public routes (no auth needed)
     let public_routes = Router::new()
         .route("/health", get(health_handler))
-        .route("/.well-known/oauth-authorization-server", get(oauth_metadata_handler))
-        .route("/.well-known/oauth-protected-resource", get(protected_resource_metadata_handler))
-        .route("/oauth/authorize", get(oauth_authorize_handler).post(oauth_authorize_post_handler))
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth_metadata_handler),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(protected_resource_metadata_handler),
+        )
+        .route(
+            "/oauth/authorize",
+            get(oauth_authorize_handler).post(oauth_authorize_post_handler),
+        )
         .route("/oauth/register", post(oauth_register_handler))
         .route("/oauth/token", post(oauth_token_handler))
-        .route("/auth/register", get(register_page_handler).post(user_register_handler))
-        .route("/admin/keys", post(crate::admin::create_key).get(crate::admin::list_keys))
+        .route(
+            "/auth/register",
+            get(register_page_handler).post(user_register_handler),
+        )
+        .route(
+            "/admin/keys",
+            post(crate::admin::create_key).get(crate::admin::list_keys),
+        )
         .route("/admin/keys/{key_id}", delete(crate::admin::delete_key))
-        .route("/admin/keys/{key_id}/deactivate", delete(crate::admin::deactivate_key))
-        .route("/admin/keys/{key_id}/reactivate", post(crate::admin::reactivate_key))
+        .route(
+            "/admin/keys/{key_id}/deactivate",
+            delete(crate::admin::deactivate_key),
+        )
+        .route(
+            "/admin/keys/{key_id}/reactivate",
+            post(crate::admin::reactivate_key),
+        )
         .route("/admin/stats", get(crate::admin::get_stats))
-        .route("/admin/oauth/providers", get(crate::admin::list_oauth_providers))
-        .route("/admin/oauth/providers", post(crate::admin::create_oauth_provider))
-        .route("/admin/oauth/providers/{id}", delete(crate::admin::delete_oauth_provider))
-        .route("/admin/oauth/providers/{id}/deactivate", delete(crate::admin::deactivate_oauth_provider))
-        .route("/admin/oauth/providers/{id}/reactivate", post(crate::admin::reactivate_oauth_provider));
+        .route(
+            "/admin/oauth/providers",
+            get(crate::admin::list_oauth_providers),
+        )
+        .route(
+            "/admin/oauth/providers",
+            post(crate::admin::create_oauth_provider),
+        )
+        .route(
+            "/admin/oauth/providers/{id}",
+            delete(crate::admin::delete_oauth_provider),
+        )
+        .route(
+            "/admin/oauth/providers/{id}/deactivate",
+            delete(crate::admin::deactivate_oauth_provider),
+        )
+        .route(
+            "/admin/oauth/providers/{id}/reactivate",
+            post(crate::admin::reactivate_oauth_provider),
+        );
 
     // Build MCP service (like official example)
     let tools_for_service = tools.clone();
@@ -838,16 +880,18 @@ pub async fn start_http_server(
         );
 
     // Build MCP routes (auth required) - use nest_service like official example
-    let mcp_routes = Router::new()
-        .nest_service("/mcp", mcp_service)
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
-        ));
+    let mcp_routes =
+        Router::new()
+            .nest_service("/mcp", mcp_service)
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ));
 
     // Build OAuth routes if configured
     let oauth_routes = crate::oauth::oauth_router_without_state();
-    let oauth_callback_routes = crate::oauth::oauth_callback_router(db.pool.clone(), base_url.clone());
+    let oauth_callback_routes =
+        crate::oauth::oauth_callback_router(db.pool.clone(), base_url.clone());
 
     // Combine all routes with CORS
     let cors = CorsLayer::new()

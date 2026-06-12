@@ -1,9 +1,9 @@
 use axum::{
-    Router,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::get,
+    Router,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -414,11 +414,7 @@ impl OAuthProvider {
     ) -> Result<Self, sqlx::Error> {
         let now = chrono::Utc::now().to_rfc3339();
         let scopes_str = scopes.join(",");
-        let issuer = auth_url
-            .splitn(2, '/')
-            .nth(2)
-            .unwrap_or("")
-            .to_string();
+        let issuer = auth_url.splitn(2, '/').nth(2).unwrap_or("").to_string();
 
         sqlx::query(
             r#"
@@ -446,11 +442,9 @@ impl OAuthProvider {
 
     /// List all providers
     pub async fn list(pool: &SqlitePool) -> Result<Vec<Self>, sqlx::Error> {
-        let providers = sqlx::query_as::<_, Self>(
-            "SELECT * FROM oauth_providers ORDER BY name",
-        )
-        .fetch_all(pool)
-        .await?;
+        let providers = sqlx::query_as::<_, Self>("SELECT * FROM oauth_providers ORDER BY name")
+            .fetch_all(pool)
+            .await?;
         Ok(providers)
     }
 
@@ -533,13 +527,15 @@ impl User {
     }
 
     /// Get user by username
-    pub async fn get_by_username(pool: &SqlitePool, username: &str) -> Result<Option<Self>, sqlx::Error> {
-        let user = sqlx::query_as::<_, Self>(
-            "SELECT * FROM users WHERE username = ? AND is_active = 1",
-        )
-        .bind(username)
-        .fetch_optional(pool)
-        .await?;
+    pub async fn get_by_username(
+        pool: &SqlitePool,
+        username: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        let user =
+            sqlx::query_as::<_, Self>("SELECT * FROM users WHERE username = ? AND is_active = 1")
+                .bind(username)
+                .fetch_optional(pool)
+                .await?;
         Ok(user)
     }
 
@@ -588,10 +584,7 @@ fn build_auth_url(provider: &OAuthProviderConfig, csrf_token: &str, redirect_uri
 }
 
 /// Exchange authorization code for access token
-async fn exchange_code(
-    provider: &OAuthProviderConfig,
-    code: &str,
-) -> Result<String, StatusCode> {
+async fn exchange_code(provider: &OAuthProviderConfig, code: &str) -> Result<String, StatusCode> {
     let client = reqwest::Client::new();
 
     let mut params = std::collections::HashMap::new();
@@ -614,13 +607,10 @@ async fn exchange_code(
         })?;
 
     let status = token_response.status();
-    let token_body: serde_json::Value = token_response
-        .json()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, status = %status, "Failed to parse token response JSON");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let token_body: serde_json::Value = token_response.json().await.map_err(|e| {
+        tracing::error!(error = %e, status = %status, "Failed to parse token response JSON");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     tracing::debug!(status = %status, body = %token_body, "Token exchange response");
 
@@ -780,7 +770,11 @@ async fn oauth_auth(
         let redirect = urlencoding::encode(&redirect_uri);
         let auth_url = format!(
             "{}?client_id={}&redirect_uri={}&scope={}&state={}&response_type=code",
-            provider.auth_url, client_id, redirect, urlencoding::encode(&scopes), csrf_token
+            provider.auth_url,
+            client_id,
+            redirect,
+            urlencoding::encode(&scopes),
+            csrf_token
         );
 
         Ok(Redirect::to(&auth_url))
@@ -862,8 +856,14 @@ async fn oauth_callback(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let client_id = provider.client_id.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let client_secret = provider.client_secret.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let client_id = provider
+        .client_id
+        .as_ref()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let client_secret = provider
+        .client_secret
+        .as_ref()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Exchange code for access token
     tracing::debug!(token_url = %provider.token_url, "Exchanging code for token");
@@ -885,13 +885,10 @@ async fn oauth_callback(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let token_body: serde_json::Value = token_response
-        .json()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to parse token response");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let token_body: serde_json::Value = token_response.json().await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to parse token response");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     tracing::debug!(token_body = %token_body, "Token response received");
 
@@ -905,7 +902,10 @@ async fn oauth_callback(
         })?;
 
     // Get user info
-    let user_info_url = provider.user_info_url.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let user_info_url = provider
+        .user_info_url
+        .as_ref()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
     tracing::debug!(user_info_url = %user_info_url, "Fetching user info");
     let user_response = token_client
         .get(user_info_url)
@@ -918,13 +918,10 @@ async fn oauth_callback(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let user_info: serde_json::Value = user_response
-        .json()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to parse user info response");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let user_info: serde_json::Value = user_response.json().await.map_err(|e| {
+        tracing::error!(error = %e, "Failed to parse user info response");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     tracing::debug!(user_info = %user_info, "User info received");
 
@@ -995,8 +992,8 @@ async fn oauth_callback(
     );
 
     // Try to parse MCP OAuth params from session
-    let mcp_params: Option<serde_json::Value> = session_redirect_to
-        .and_then(|rt| serde_json::from_str(&rt).ok());
+    let mcp_params: Option<serde_json::Value> =
+        session_redirect_to.and_then(|rt| serde_json::from_str(&rt).ok());
 
     let redirect_url = if let Some(params) = mcp_params {
         let mcp_client_id = params["client_id"].as_str().unwrap_or_default();
@@ -1026,8 +1023,15 @@ async fn oauth_callback(
             match result {
                 Ok(_) => {
                     tracing::info!(client_id = %mcp_client_id, user = %oauth_user.login, "MCP OAuth authorization code generated");
-                    let separator = if mcp_redirect_uri.contains('?') { '&' } else { '?' };
-                    let final_redirect = format!("{}{}code={}&state={}", mcp_redirect_uri, separator, auth_code, mcp_state);
+                    let separator = if mcp_redirect_uri.contains('?') {
+                        '&'
+                    } else {
+                        '?'
+                    };
+                    let final_redirect = format!(
+                        "{}{}code={}&state={}",
+                        mcp_redirect_uri, separator, auth_code, mcp_state
+                    );
                     tracing::info!(redirect = %final_redirect, "Redirecting to MCP client with auth code");
                     final_redirect
                 }

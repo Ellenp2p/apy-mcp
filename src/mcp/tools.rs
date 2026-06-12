@@ -98,10 +98,7 @@ impl ApyMcpTools {
         description = "Get lending/borrowing rates for all monitored DeFi pools across all chains. \
         Returns a summary of all pools with their current interest rates."
     )]
-    async fn get_all_rates(
-        &self,
-        ctx: rmcp::service::RequestContext<rmcp::RoleServer>,
-    ) -> String {
+    async fn get_all_rates(&self, ctx: rmcp::service::RequestContext<rmcp::RoleServer>) -> String {
         // Log custom headers if present
         if let Some(metadata) = ctx.extensions.get::<RequestMetadata>() {
             if !metadata.custom_headers.is_empty() {
