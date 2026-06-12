@@ -539,6 +539,22 @@
                 <div class="card-title">添加 OAuth Provider</div>
                 <button class="modal-close" onclick="closeCreateOAuthModal()">&times;</button>
             </div>
+
+            <!-- Quick Add Buttons -->
+            <div style="margin-bottom: 20px;">
+                <label style="font-size: 14px; color: var(--muted); margin-bottom: 8px; display: block;">快速添加</label>
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn" style="background: #24292e; color: white; flex: 1;" onclick="presetGitHub()">
+                        🐙 GitHub
+                    </button>
+                    <button class="btn" style="background: #4285f4; color: white; flex: 1;" onclick="presetGoogle()">
+                        🔍 Google
+                    </button>
+                </div>
+            </div>
+
+            <div style="text-align: center; color: var(--muted); margin: 16px 0;">— 或手动配置 —</div>
+
             <div class="form-group">
                 <label>Provider 名称 *</label>
                 <input type="text" id="oauthName" placeholder="如: github, google, keycloak">
@@ -820,6 +836,29 @@
             document.getElementById('oauthClientId').value = '';
             document.getElementById('oauthClientSecret').value = '';
             document.getElementById('oauthScopes').value = '';
+        }
+
+        // Preset configurations for popular providers
+        function presetGitHub() {
+            document.getElementById('oauthName').value = 'github';
+            document.getElementById('oauthIssuer').value = '';
+            document.getElementById('oauthAuthUrl').value = 'https://github.com/login/oauth/authorize';
+            document.getElementById('oauthTokenUrl').value = 'https://github.com/login/oauth/access_token';
+            document.getElementById('oauthUserInfoUrl').value = 'https://api.github.com/user';
+            document.getElementById('oauthScopes').value = 'read:user,user:email';
+            document.getElementById('oauthClientId').focus();
+            showToast('已填入 GitHub 配置，请输入 Client ID 和 Secret', 'info');
+        }
+
+        function presetGoogle() {
+            document.getElementById('oauthName').value = 'google';
+            document.getElementById('oauthIssuer').value = '';
+            document.getElementById('oauthAuthUrl').value = 'https://accounts.google.com/o/oauth2/v2/auth';
+            document.getElementById('oauthTokenUrl').value = 'https://oauth2.googleapis.com/token';
+            document.getElementById('oauthUserInfoUrl').value = 'https://www.googleapis.com/oauth2/v2/userinfo';
+            document.getElementById('oauthScopes').value = 'openid,email,profile';
+            document.getElementById('oauthClientId').focus();
+            showToast('已填入 Google 配置，请输入 Client ID 和 Secret', 'info');
         }
 
         async function createOAuthProvider() {
