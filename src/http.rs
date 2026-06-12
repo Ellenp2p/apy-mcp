@@ -56,6 +56,7 @@ pub struct HttpState {
     pub tools: ApyMcpTools,
     pub db: Database,
     pub admin_token: Option<String>,
+    pub base_url: String,
     pub rate_limiters: Arc<tokio::sync::RwLock<std::collections::HashMap<String, RateLimiter>>>,
 }
 
@@ -225,17 +226,12 @@ async fn health_handler() -> impl IntoResponse {
 
 /// RFC 9728 - OAuth Protected Resource Metadata
 /// VS Code needs this to discover how to authenticate with the MCP server
-async fn protected_resource_metadata_handler() -> Result<axum::Json<serde_json::Value>, StatusCode> {
+async fn protected_resource_metadata_handler(
+    State(state): State<HttpState>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     Ok(axum::Json(serde_json::json!({
-        "resource": "http://localhost:3000/mcp",
-        "authorization_servers": [
-            {
-                "issuer": "http://localhost:3000",
-                "authorization_endpoint": "http://localhost:3000/oauth/authorize",
-                "token_endpoint": "http://localhost:3000/oauth/token",
-                "registration_endpoint": "http://localhost:3000/oauth/register"
-            }
-        ],
+        "resource": format!("{}/mcp", state.base_url),
+        "authorization_servers": [state.base_url],
         "scopes_supported": ["openid", "profile", "email"],
         "bearer_methods_supported": ["header"]
     })))
@@ -244,15 +240,13 @@ async fn protected_resource_metadata_handler() -> Result<axum::Json<serde_json::
 /// RFC 8414 - OAuth Server Metadata Discovery
 /// VS Code and other MCP clients use this to discover OAuth endpoints
 async fn oauth_metadata_handler(
-    State(_state): State<HttpState>,
+    State(state): State<HttpState>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
-    let base_url = "http://localhost:3000"; // TODO: make configurable
-
     Ok(axum::Json(serde_json::json!({
-        "issuer": base_url,
-        "authorization_endpoint": format!("{}/oauth/authorize", base_url),
-        "token_endpoint": format!("{}/oauth/token", base_url),
-        "registration_endpoint": format!("{}/oauth/register", base_url),
+        "issuer": state.base_url,
+        "authorization_endpoint": format!("{}/oauth/authorize", state.base_url),
+        "token_endpoint": format!("{}/oauth/token", state.base_url),
+        "registration_endpoint": format!("{}/oauth/register", state.base_url),
         "scopes_supported": ["openid", "profile", "email"],
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
@@ -781,11 +775,13 @@ pub async fn start_http_server(
     tools: ApyMcpTools,
     db: Database,
     admin_token: Option<String>,
+    base_url: String,
 ) -> anyhow::Result<()> {
     let state = HttpState {
         tools: tools.clone(),
         db: db.clone(),
         admin_token: admin_token.clone(),
+        base_url: base_url.clone(),
         rate_limiters: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
@@ -828,8 +824,7 @@ pub async fn start_http_server(
 
     // Build OAuth routes if configured
     let oauth_routes = crate::oauth::oauth_router_without_state();
-    let base_url = format!("http://localhost:{}", addr.port());
-    let oauth_callback_routes = crate::oauth::oauth_callback_router(db.pool.clone(), base_url);
+    let oauth_callback_routes = crate::oauth::oauth_callback_router(db.pool.clone(), base_url.clone());
 
     // Combine all routes with CORS
     let cors = CorsLayer::new()

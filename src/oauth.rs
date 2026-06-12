@@ -767,6 +767,8 @@ async fn oauth_callback(
     };
 
     // Validate CSRF token and provider
+    tracing::debug!(csrf_state = %csrf_state, provider = %provider_name, "Validating OAuth callback");
+
     let session = sqlx::query_as::<_, (String, String)>(
         "SELECT csrf_token, provider FROM oauth_sessions WHERE csrf_token = ? AND expires_at > ?",
     )
@@ -774,13 +776,21 @@ async fn oauth_callback(
     .bind(chrono::Utc::now().to_rfc3339())
     .fetch_optional(&state.pool)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to query oauth_sessions");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     match session {
         Some((_, stored_provider)) if stored_provider == provider_name => {
-            // Valid session
+            tracing::debug!("CSRF token validated successfully");
         }
-        _ => {
+        Some((_, stored_provider)) => {
+            tracing::warn!(expected = %provider_name, got = %stored_provider, "Provider mismatch");
+            return Ok(Redirect::to("/?error=invalid_state").into_response());
+        }
+        None => {
+            tracing::warn!(csrf_state = %csrf_state, "CSRF token not found or expired");
             return Ok(Redirect::to("/?error=invalid_state").into_response());
         }
     }
@@ -802,6 +812,7 @@ async fn oauth_callback(
     let client_secret = provider.client_secret.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Exchange code for access token
+    tracing::debug!(token_url = %provider.token_url, "Exchanging code for token");
     let token_client = reqwest::Client::new();
     let mut params = std::collections::HashMap::new();
     params.insert("client_id", client_id.as_str());
@@ -815,32 +826,53 @@ async fn oauth_callback(
         .form(&params)
         .send()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to exchange code for token");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let token_body: serde_json::Value = token_response
         .json()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to parse token response");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::debug!(token_body = %token_body, "Token response received");
 
     let access_token = token_body
         .get("access_token")
         .or_else(|| token_body.get("id_token"))
         .and_then(|v| v.as_str())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+        .ok_or_else(|| {
+            tracing::error!(body = %token_body, "No access_token in response");
+            StatusCode::UNAUTHORIZED
+        })?;
 
     // Get user info
     let user_info_url = provider.user_info_url.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    tracing::debug!(user_info_url = %user_info_url, "Fetching user info");
     let user_response = token_client
         .get(user_info_url)
         .header("Authorization", format!("Bearer {}", access_token))
+        .header("User-Agent", "apy-mcp")
         .send()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to fetch user info");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let user_info: serde_json::Value = user_response
         .json()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to parse user info response");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::debug!(user_info = %user_info, "User info received");
 
     // Parse user info (try common fields)
     let id = user_info["id"]

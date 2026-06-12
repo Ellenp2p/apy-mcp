@@ -51,6 +51,10 @@ enum Commands {
         #[arg(long)]
         admin_token: Option<String>,
 
+        /// Base URL for OAuth redirects (e.g., "http://localhost:3000" or "https://mcp.example.com")
+        #[arg(long)]
+        base_url: Option<String>,
+
         /// Default Blend pool ID
         #[arg(long, default_value = DEFAULT_BLEND_POOL)]
         pool_id: String,
@@ -286,6 +290,7 @@ async fn main() -> Result<()> {
             addr,
             db_path,
             admin_token,
+            base_url,
             pool_id,
             github_client_id,
             github_client_secret,
@@ -315,8 +320,14 @@ async fn main() -> Result<()> {
             oauth::init_oauth_db(&db.pool).await?;
             tracing::info!("OAuth tables initialized");
 
+            // Determine base URL for OAuth redirects
+            let base_url = base_url.unwrap_or_else(|| {
+                let port = addr.split(':').last().unwrap_or("3000");
+                format!("http://localhost:{}", port)
+            });
+            tracing::info!("OAuth base URL: {}", base_url);
+
             // Initialize default OAuth providers from environment variables
-            let base_url = format!("http://localhost:{}", addr.split(':').last().unwrap_or("3000"));
             oauth::init_default_providers(&db.pool, &base_url).await?;
 
             let tools = ApyMcpTools::new(&pool_id);
@@ -326,7 +337,7 @@ async fn main() -> Result<()> {
             let admin_token = admin_token.or_else(|| std::env::var("ADMIN_TOKEN").ok());
 
             // Start HTTP server (OAuth providers are now managed via database)
-            http::start_http_server(addr, tools, db, admin_token).await?;
+            http::start_http_server(addr, tools, db, admin_token, base_url).await?;
         }
         Commands::Admin { command } => match command {
             AdminCommands::CreateKey {
