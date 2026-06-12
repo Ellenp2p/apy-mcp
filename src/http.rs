@@ -426,8 +426,14 @@ async fn oauth_authorize_handler(
             _ => ("🔐", "#6c5ce7"),
         };
         social_buttons.push_str(&format!(
-            r#"<a href="/auth/{}" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: {}; color: white; font-size: 16px; cursor: pointer; text-decoration: none; margin-bottom: 8px; box-sizing: border-box;">{} {}</a>"#,
-            provider.name, bg_color, icon, capitalize(&provider.name)
+            r#"<a href="/auth/{}?client_id={}&redirect_uri={}&state={}&code_challenge={}&scope={}" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: {}; color: white; font-size: 16px; cursor: pointer; text-decoration: none; margin-bottom: 8px; box-sizing: border-box;">{} {}</a>"#,
+            provider.name,
+            urlencoding::encode(&client_id),
+            urlencoding::encode(&redirect_uri),
+            urlencoding::encode(&state),
+            urlencoding::encode(&code_challenge),
+            urlencoding::encode(&scope),
+            bg_color, icon, capitalize(&provider.name)
         ));
     }
 
@@ -769,6 +775,23 @@ async fn oauth_token_handler(
     }
 }
 
+/// Serve static files (index.html) as fallback for unmatched routes
+async fn static_file_handler() -> impl IntoResponse {
+    match std::fs::read_to_string("index.html") {
+        Ok(content) => (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            content,
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            "index.html not found",
+        )
+            .into_response(),
+    }
+}
+
 /// Start the HTTP server
 pub async fn start_http_server(
     addr: SocketAddr,
@@ -832,11 +855,13 @@ pub async fn start_http_server(
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
+    // Serve static files (index.html) as fallback
     let app = Router::new()
         .merge(public_routes)
         .merge(mcp_routes)
         .merge(oauth_routes)
         .merge(oauth_callback_routes)
+        .fallback(get(static_file_handler))
         .layer(cors)
         .with_state(state);
 

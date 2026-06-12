@@ -148,6 +148,20 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             expires_at TEXT NOT NULL
         );
 
+        -- Migration: add redirect_to column if missing
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    // Try to add redirect_to column (ignore error if already exists)
+    sqlx::query("ALTER TABLE oauth_sessions ADD COLUMN redirect_to TEXT")
+        .execute(pool)
+        .await
+        .ok(); // Ignore error if column already exists
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS oauth_users (
             id TEXT NOT NULL,
             provider TEXT NOT NULL,
@@ -586,18 +600,29 @@ async fn exchange_code(
     params.insert("code", code);
     params.insert("grant_type", "authorization_code");
 
+    tracing::debug!(token_url = %provider.token_url, client_id = %provider.client_id, "Exchanging code for token");
+
     let token_response = client
         .post(&provider.token_url)
         .header("Accept", "application/json")
         .form(&params)
         .send()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, url = %provider.token_url, "Token exchange HTTP request failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
+    let status = token_response.status();
     let token_body: serde_json::Value = token_response
         .json()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, status = %status, "Failed to parse token response JSON");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    tracing::debug!(status = %status, body = %token_body, "Token exchange response");
 
     // Try different token field names (access_token for most, id_token for some)
     let access_token = token_body
@@ -707,6 +732,7 @@ async fn get_user_info(
 async fn oauth_auth(
     State(state): State<OAuthState>,
     Path(provider_name): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Redirect, StatusCode> {
     // Look up provider from database
     let provider = OAuthProvider::get_by_name(&state.pool, &provider_name)
@@ -718,15 +744,32 @@ async fn oauth_auth(
         let csrf_token = generate_csrf_token();
         let redirect_uri = format!("{}/auth/{}/callback", state.base_url, provider_name);
 
-        // Store CSRF token in database
+        tracing::info!(
+            provider = %provider_name,
+            mcp_client_id = ?params.get("client_id"),
+            mcp_redirect_uri = ?params.get("redirect_uri"),
+            mcp_state = ?params.get("state"),
+            "OAuth auth started - storing MCP params"
+        );
+
+        // Store MCP OAuth parameters in redirect_to as JSON
+        let mcp_oauth_params = serde_json::json!({
+            "client_id": params.get("client_id").cloned().unwrap_or_default(),
+            "redirect_uri": params.get("redirect_uri").cloned().unwrap_or_default(),
+            "state": params.get("state").cloned().unwrap_or_default(),
+            "code_challenge": params.get("code_challenge").cloned().unwrap_or_default(),
+            "scope": params.get("scope").cloned().unwrap_or_default(),
+        });
+
         let now = chrono::Utc::now().to_rfc3339();
         let expires = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
 
         sqlx::query(
-            "INSERT INTO oauth_sessions (csrf_token, provider, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO oauth_sessions (csrf_token, provider, redirect_to, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&csrf_token)
         .bind(&provider_name)
+        .bind(mcp_oauth_params.to_string())
         .bind(&now)
         .bind(&expires)
         .execute(&state.pool)
@@ -794,6 +837,17 @@ async fn oauth_callback(
             return Ok(Redirect::to("/?error=invalid_state").into_response());
         }
     }
+
+    // Read MCP OAuth params from session before deleting
+    let session_redirect_to = sqlx::query_as::<_, (Option<String>,)>(
+        "SELECT redirect_to FROM oauth_sessions WHERE csrf_token = ?",
+    )
+    .bind(&csrf_state)
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten()
+    .and_then(|(rt,)| rt);
 
     // Delete used CSRF token
     sqlx::query("DELETE FROM oauth_sessions WHERE csrf_token = ?")
@@ -940,12 +994,64 @@ async fn oauth_callback(
         "OAuth login successful"
     );
 
-    // Redirect to success page
-    let redirect_url = format!(
-        "/?oauth=success&provider={}&user={}",
-        urlencoding::encode(&provider_name),
-        urlencoding::encode(&oauth_user.login)
-    );
+    // Try to parse MCP OAuth params from session
+    let mcp_params: Option<serde_json::Value> = session_redirect_to
+        .and_then(|rt| serde_json::from_str(&rt).ok());
+
+    let redirect_url = if let Some(params) = mcp_params {
+        let mcp_client_id = params["client_id"].as_str().unwrap_or_default();
+        let mcp_redirect_uri = params["redirect_uri"].as_str().unwrap_or_default();
+        let mcp_state = params["state"].as_str().unwrap_or_default();
+        let mcp_scope = params["scope"].as_str().unwrap_or_default();
+
+        if !mcp_redirect_uri.is_empty() && !mcp_client_id.is_empty() {
+            // Generate authorization code for MCP OAuth flow
+            let auth_code = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now().to_rfc3339();
+            let expires = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
+
+            let result = sqlx::query(
+                "INSERT INTO oauth_authorization_codes (code, client_id, user_id, redirect_uri, scope, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&auth_code)
+            .bind(mcp_client_id)
+            .bind(&oauth_user.login)
+            .bind(mcp_redirect_uri)
+            .bind(mcp_scope)
+            .bind(&expires)
+            .bind(&now)
+            .execute(&state.pool)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    tracing::info!(client_id = %mcp_client_id, user = %oauth_user.login, "MCP OAuth authorization code generated");
+                    let separator = if mcp_redirect_uri.contains('?') { '&' } else { '?' };
+                    let final_redirect = format!("{}{}code={}&state={}", mcp_redirect_uri, separator, auth_code, mcp_state);
+                    tracing::info!(redirect = %final_redirect, "Redirecting to MCP client with auth code");
+                    final_redirect
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to store authorization code");
+                    format!("/?error=server_error")
+                }
+            }
+        } else {
+            // No MCP OAuth params, redirect to success page
+            format!(
+                "/?oauth=success&provider={}&user={}",
+                urlencoding::encode(&provider_name),
+                urlencoding::encode(&oauth_user.login)
+            )
+        }
+    } else {
+        // No MCP OAuth flow, redirect to success page
+        format!(
+            "/?oauth=success&provider={}&user={}",
+            urlencoding::encode(&provider_name),
+            urlencoding::encode(&oauth_user.login)
+        )
+    };
     Ok(Redirect::to(&redirect_url).into_response())
 }
 
