@@ -2,19 +2,16 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Router,
-    body::Body,
     extract::{Request, State},
     http::{HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
-use http_body_util::BodyExt;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::local::LocalSessionManager,
 };
-use tower_service::Service;
 use tower_http::cors::{CorsLayer, Any};
 
 use crate::{db::Database, mcp::tools::ApyMcpTools};
@@ -103,7 +100,10 @@ async fn auth_middleware(
     .bind(chrono::Utc::now().to_rfc3339())
     .fetch_optional(&state.db.pool)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to query oauth_access_tokens");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if let Some((_token, user_id, _client_id, _scope)) = oauth_token {
         tracing::debug!(user_id = %user_id, "OAuth access token validated");
@@ -118,14 +118,17 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    // 2. Check if it's a GitHub OAuth token
-    let github_user = sqlx::query_as::<_, (i64, String, Option<String>, Option<String>, Option<String>)>(
-        "SELECT id, login, name, email, avatar_url FROM github_users WHERE access_token = ?",
+    // 2. Check if it's a GitHub OAuth token (stored in oauth_users table)
+    let github_user = sqlx::query_as::<_, (String, String, Option<String>, Option<String>, Option<String>)>(
+        "SELECT id, login, name, email, avatar_url FROM oauth_users WHERE access_token = ? AND provider = 'github'",
     )
     .bind(raw_key)
     .fetch_optional(&state.db.pool)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to query oauth_users for GitHub token");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if let Some((_id, login, _name, _email, _avatar)) = github_user {
         // GitHub OAuth token is valid, allow request
@@ -155,7 +158,10 @@ async fn auth_middleware(
         .db
         .validate_key(raw_key)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to validate API key");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Check rate limit
@@ -238,7 +244,7 @@ async fn protected_resource_metadata_handler() -> Result<axum::Json<serde_json::
 /// RFC 8414 - OAuth Server Metadata Discovery
 /// VS Code and other MCP clients use this to discover OAuth endpoints
 async fn oauth_metadata_handler(
-    State(state): State<HttpState>,
+    State(_state): State<HttpState>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     let base_url = "http://localhost:3000"; // TODO: make configurable
 
@@ -589,8 +595,10 @@ async fn oauth_register_handler(
 }
 
 /// OAuth Token endpoint
+/// Supports both client_secret_post (form body) and client_secret_basic (Authorization header)
 async fn oauth_token_handler(
     State(state): State<HttpState>,
+    headers: HeaderMap,
     axum::extract::Form(params): axum::extract::Form<std::collections::HashMap<String, String>>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     let grant_type = params.get("grant_type").ok_or(StatusCode::BAD_REQUEST)?;
@@ -598,16 +606,46 @@ async fn oauth_token_handler(
     match grant_type.as_str() {
         "authorization_code" => {
             let code = params.get("code").ok_or(StatusCode::BAD_REQUEST)?;
-            let client_id = params.get("client_id").ok_or(StatusCode::BAD_REQUEST)?;
-            let empty_secret = String::new();
-            let client_secret = params.get("client_secret").unwrap_or(&empty_secret);
+
+            // Support both client_secret_post and client_secret_basic
+            // First try form body, then fall back to Authorization header
+            let (client_id, client_secret) = if let (Some(id), Some(secret)) =
+                (params.get("client_id"), params.get("client_secret"))
+            {
+                // client_secret_post: credentials in form body
+                (id.clone(), secret.clone())
+            } else if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                // client_secret_basic: credentials in Authorization header (Base64 encoded)
+                if let Some(basic) = auth_header.strip_prefix("Basic ") {
+                    use base64::Engine;
+                    match base64::engine::general_purpose::STANDARD.decode(basic) {
+                        Ok(decoded) => {
+                            let decoded_str = String::from_utf8_lossy(&decoded);
+                            let parts: Vec<&str> = decoded_str.splitn(2, ':').collect();
+                            if parts.len() == 2 {
+                                (parts[0].to_string(), parts[1].to_string())
+                            } else {
+                                return Err(StatusCode::BAD_REQUEST);
+                            }
+                        }
+                        Err(_) => return Err(StatusCode::BAD_REQUEST),
+                    }
+                } else {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+            } else if let Some(id) = params.get("client_id") {
+                // client_id in form body but no secret
+                (id.clone(), String::new())
+            } else {
+                return Err(StatusCode::BAD_REQUEST);
+            };
 
             // Check if client exists, if not auto-register (for VS Code compatibility)
             use sha2::{Digest, Sha256};
             let existing_client = sqlx::query_as::<_, (String, String)>(
                 "SELECT client_id, client_secret FROM oauth_clients WHERE client_id = ?",
             )
-            .bind(client_id)
+            .bind(&client_id)
             .fetch_optional(&state.db.pool)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -622,7 +660,7 @@ async fn oauth_token_handler(
                 sqlx::query(
                     "INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?)",
                 )
-                .bind(client_id)
+                .bind(&client_id)
                 .bind(&secret_hash)
                 .bind("VS Code MCP Client")
                 .bind("[]")
@@ -639,7 +677,7 @@ async fn oauth_token_handler(
                 "SELECT code, client_id, user_id FROM oauth_authorization_codes WHERE code = ? AND client_id = ? AND expires_at > ?",
             )
             .bind(code)
-            .bind(client_id)
+            .bind(&client_id)
             .bind(chrono::Utc::now().to_rfc3339())
             .fetch_optional(&state.db.pool)
             .await
@@ -658,16 +696,23 @@ async fn oauth_token_handler(
                     let access_token = format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
 
                     // Store access token
-                    sqlx::query(
-                        "INSERT INTO oauth_access_tokens (token, user_id, client_id, expires_at) VALUES (?, ?, ?, ?)",
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+                    let result = sqlx::query(
+                        "INSERT INTO oauth_access_tokens (token, user_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
                     )
                     .bind(&access_token)
                     .bind(&user_id)
-                    .bind(client_id)
-                    .bind((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339())
+                    .bind(&client_id)
+                    .bind(&expires_at)
+                    .bind(&now)
                     .execute(&state.db.pool)
-                    .await
-                    .ok();
+                    .await;
+
+                    if let Err(e) = &result {
+                        tracing::error!(error = %e, "Failed to store access token");
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    }
 
                     tracing::info!(user_id = %user_id, "Access token issued");
 
