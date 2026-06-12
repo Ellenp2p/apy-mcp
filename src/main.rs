@@ -315,6 +315,10 @@ async fn main() -> Result<()> {
             oauth::init_oauth_db(&db.pool).await?;
             tracing::info!("OAuth tables initialized");
 
+            // Initialize default OAuth providers from environment variables
+            let base_url = format!("http://localhost:{}", addr.split(':').last().unwrap_or("3000"));
+            oauth::init_default_providers(&db.pool, &base_url).await?;
+
             let tools = ApyMcpTools::new(&pool_id);
             let addr: std::net::SocketAddr = addr.parse()?;
 

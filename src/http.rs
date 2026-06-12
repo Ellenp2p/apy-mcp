@@ -398,6 +398,7 @@ async fn user_register_handler(
 
 /// OAuth Authorization endpoint - returns login page
 async fn oauth_authorize_handler(
+    State(http_state): State<HttpState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::response::Html<String>, StatusCode> {
     let client_id = params.get("client_id").cloned().unwrap_or_default();
@@ -413,7 +414,36 @@ async fn oauth_authorize_handler(
         ""
     };
 
-    // Generate a simple login page
+    // Query available OAuth providers from database
+    let providers = crate::oauth::OAuthProvider::list(&http_state.db.pool)
+        .await
+        .unwrap_or_default();
+    let active_providers: Vec<_> = providers
+        .iter()
+        .filter(|p| p.is_active && p.client_id.is_some())
+        .collect();
+
+    // Build social login buttons
+    let mut social_buttons = String::new();
+    for provider in &active_providers {
+        let (icon, bg_color) = match provider.name.as_str() {
+            "github" => ("🐙", "#24292e"),
+            "google" => ("🔍", "#4285f4"),
+            _ => ("🔐", "#6c5ce7"),
+        };
+        social_buttons.push_str(&format!(
+            r#"<a href="/auth/{}" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: {}; color: white; font-size: 16px; cursor: pointer; text-decoration: none; margin-bottom: 8px; box-sizing: border-box;">{} {}</a>"#,
+            provider.name, bg_color, icon, capitalize(&provider.name)
+        ));
+    }
+
+    let separator = if !social_buttons.is_empty() {
+        r#"<div style="text-align: center; margin: 16px 0; color: #8b8fa3; font-size: 14px;">─── or ───</div>"#
+    } else {
+        ""
+    };
+
+    // Generate login page
     let html = format!(
         r#"<!DOCTYPE html>
 <html>
@@ -444,6 +474,8 @@ async fn oauth_authorize_handler(
             <strong>Scope:</strong> {scope}
         </div>
         {error_msg}
+        {social_buttons}
+        {separator}
         <form method="POST" action="/oauth/authorize">
             <input type="hidden" name="client_id" value="{client_id}">
             <input type="hidden" name="redirect_uri" value="{redirect_uri}">
@@ -465,10 +497,21 @@ async fn oauth_authorize_handler(
         redirect_uri = redirect_uri,
         state = state,
         code_challenge = code_challenge,
-        error_msg = error_msg
+        error_msg = error_msg,
+        social_buttons = social_buttons,
+        separator = separator,
     );
 
     Ok(axum::response::Html(html))
+}
+
+/// Capitalize first letter of a string
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        None => String::new(),
+        Some(f) => f.to_uppercase().to_string() + c.as_str(),
+    }
 }
 
 /// Handle OAuth authorization form submission

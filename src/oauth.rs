@@ -203,6 +203,70 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Initialize default OAuth providers from environment variables
+/// Checks for GITHUB_CLIENT_ID/SECRET and GOOGLE_CLIENT_ID/SECRET
+pub async fn init_default_providers(pool: &SqlitePool, base_url: &str) -> Result<(), sqlx::Error> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    // GitHub OAuth
+    if let (Ok(client_id), Ok(client_secret)) = (
+        std::env::var("GITHUB_CLIENT_ID"),
+        std::env::var("GITHUB_CLIENT_SECRET"),
+    ) {
+        tracing::info!("Configuring GitHub OAuth provider");
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO oauth_providers (name, issuer, auth_url, token_url, user_info_url, client_id, client_secret, scopes, is_dynamic, is_active, created_at)
+            VALUES ('github', 'https://github.com', 'https://github.com/login/oauth/authorize', 'https://github.com/login/oauth/access_token', 'https://api.github.com/user', ?, ?, 'read:user,user:email', 0, 1, ?)
+            "#,
+        )
+        .bind(&client_id)
+        .bind(&client_secret)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+
+        // Update if already exists
+        sqlx::query(
+            "UPDATE oauth_providers SET client_id = ?, client_secret = ?, is_active = 1 WHERE name = 'github'",
+        )
+        .bind(&client_id)
+        .bind(&client_secret)
+        .execute(pool)
+        .await?;
+    }
+
+    // Google OAuth
+    if let (Ok(client_id), Ok(client_secret)) = (
+        std::env::var("GOOGLE_CLIENT_ID"),
+        std::env::var("GOOGLE_CLIENT_SECRET"),
+    ) {
+        tracing::info!("Configuring Google OAuth provider");
+        sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO oauth_providers (name, issuer, auth_url, token_url, user_info_url, client_id, client_secret, scopes, is_dynamic, is_active, created_at)
+            VALUES ('google', 'https://accounts.google.com', 'https://accounts.google.com/o/oauth2/v2/auth', 'https://oauth2.googleapis.com/token', 'https://www.googleapis.com/oauth2/v2/userinfo', ?, ?, 'openid,email,profile', 0, 1, ?)
+            "#,
+        )
+        .bind(&client_id)
+        .bind(&client_secret)
+        .bind(&now)
+        .execute(pool)
+        .await?;
+
+        // Update if already exists
+        sqlx::query(
+            "UPDATE oauth_providers SET client_id = ?, client_secret = ?, is_active = 1 WHERE name = 'google'",
+        )
+        .bind(&client_id)
+        .bind(&client_secret)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
+
 impl OAuthProvider {
     /// Discover OAuth server metadata (RFC 8414)
     pub async fn discover_metadata(issuer: &str) -> Result<OAuthServerMetadata, reqwest::Error> {

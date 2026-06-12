@@ -1,45 +1,19 @@
-# Build stage
-FROM rust:1.82-slim as builder
+FROM rust:1.77-slim as builder
 
 WORKDIR /app
-
-# Copy manifests first for better caching
 COPY Cargo.toml Cargo.lock ./
+COPY src/ src/
+RUN cargo build --release
 
-# Create a dummy main.rs to build dependencies
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release 2>/dev/null || true && \
-    rm -rf src
-
-# Copy actual source
-COPY src ./src
-
-# Build the application
-RUN touch src/main.rs && cargo build --release
-
-# Runtime stage
 FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/apy-mcp /usr/local/bin/
 
-# Copy the binary
-COPY --from=builder /app/target/release/apy-mcp /usr/local/bin/apy-mcp
+# Create data directory for SQLite
+RUN mkdir -p /app/data
+WORKDIR /app
 
-# Create non-root user
-RUN useradd -m -s /bin/bash mcp
-USER mcp
-
-# Expose port
 EXPOSE 3000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:3000/health || exit 1
-
-# Default to HTTP mode
-ENTRYPOINT ["apy-mcp"]
-CMD ["http", "--addr", "0.0.0.0:3000"]
+CMD ["apy-mcp", "http", "--addr", "0.0.0.0:3000", "--pool-id", "CAJJZSGMMM3PD7N33TAPHGBUGTB43OC73HVIK2L2G6BNGGGYOSSYBXBD"]
