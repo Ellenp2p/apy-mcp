@@ -217,16 +217,27 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Initialize default OAuth providers from environment variables
-/// Checks for GITHUB_CLIENT_ID/SECRET and GOOGLE_CLIENT_ID/SECRET
-pub async fn init_default_providers(pool: &SqlitePool, base_url: &str) -> Result<(), sqlx::Error> {
+/// Initialize default OAuth providers from CLI args / environment variables
+/// CLI args take priority; falls back to env vars (GITHUB_CLIENT_ID/SECRET, GOOGLE_CLIENT_ID/SECRET)
+pub async fn init_default_providers(
+    pool: &SqlitePool,
+    _base_url: &str,
+    github_client_id: Option<&str>,
+    github_client_secret: Option<&str>,
+    google_client_id: Option<&str>,
+    google_client_secret: Option<&str>,
+) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().to_rfc3339();
 
-    // GitHub OAuth
-    if let (Ok(client_id), Ok(client_secret)) = (
-        std::env::var("GITHUB_CLIENT_ID"),
-        std::env::var("GITHUB_CLIENT_SECRET"),
-    ) {
+    // GitHub OAuth (CLI args > env vars)
+    let gh_id = github_client_id
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("GITHUB_CLIENT_ID").ok());
+    let gh_secret = github_client_secret
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("GITHUB_CLIENT_SECRET").ok());
+
+    if let (Some(client_id), Some(client_secret)) = (gh_id, gh_secret) {
         tracing::info!("Configuring GitHub OAuth provider");
         sqlx::query(
             r#"
@@ -250,11 +261,15 @@ pub async fn init_default_providers(pool: &SqlitePool, base_url: &str) -> Result
         .await?;
     }
 
-    // Google OAuth
-    if let (Ok(client_id), Ok(client_secret)) = (
-        std::env::var("GOOGLE_CLIENT_ID"),
-        std::env::var("GOOGLE_CLIENT_SECRET"),
-    ) {
+    // Google OAuth (CLI args > env vars)
+    let gg_id = google_client_id
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("GOOGLE_CLIENT_ID").ok());
+    let gg_secret = google_client_secret
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("GOOGLE_CLIENT_SECRET").ok());
+
+    if let (Some(client_id), Some(client_secret)) = (gg_id, gg_secret) {
         tracing::info!("Configuring Google OAuth provider");
         sqlx::query(
             r#"

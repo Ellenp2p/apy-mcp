@@ -332,8 +332,16 @@ async fn main() -> Result<()> {
             });
             tracing::info!("OAuth base URL: {}", base_url);
 
-            // Initialize default OAuth providers from environment variables
-            oauth::init_default_providers(&db.pool, &base_url).await?;
+            // Initialize default OAuth providers (CLI args > env vars)
+            oauth::init_default_providers(
+                &db.pool,
+                &base_url,
+                github_client_id.as_deref(),
+                github_client_secret.as_deref(),
+                google_client_id.as_deref(),
+                google_client_secret.as_deref(),
+            )
+            .await?;
 
             let tools = ApyMcpTools::new(&pool_id);
             let addr: std::net::SocketAddr = addr.parse()?;
