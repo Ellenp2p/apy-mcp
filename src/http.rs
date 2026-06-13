@@ -870,13 +870,30 @@ pub async fn start_http_server(
             post(crate::admin::reactivate_oauth_provider),
         );
 
-    // Build MCP service (like official example)
+    // Build MCP service - configure allowed hosts from base_url
     let tools_for_service = tools.clone();
+    let mut allowed_hosts: Vec<String> = vec![
+        "localhost".into(),
+        "127.0.0.1".into(),
+        "::1".into(),
+        "0.0.0.0".into(),
+    ];
+    // Extract hostname from base_url and add to allowed hosts
+    if let Ok(url) = url::Url::parse(&base_url) {
+        if let Some(host) = url.host_str() {
+            if !allowed_hosts.contains(&host.to_string()) {
+                allowed_hosts.push(host.to_string());
+            }
+        }
+    }
+    tracing::info!("MCP allowed hosts: {:?}", allowed_hosts);
+
     let mcp_service: StreamableHttpService<crate::mcp::tools::ApyMcpTools, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(tools_for_service.clone()),
             LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default(),
+            StreamableHttpServerConfig::default()
+                .with_allowed_hosts(allowed_hosts),
         );
 
     // Build MCP routes (auth required) - use nest_service like official example
