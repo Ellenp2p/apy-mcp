@@ -102,6 +102,63 @@ enum Commands {
         /// Custom OAuth Scopes (optional, or set CUSTOM_OAUTH_SCOPES env var, comma-separated)
         #[arg(long)]
         custom_oauth_scopes: Option<String>,
+
+        /// EVM RPC URL for Ethereum (optional, or set EVM_RPC_ETHEREUM env var)
+        #[arg(long)]
+        evm_rpc_ethereum: Option<String>,
+
+        /// EVM RPC URL for Polygon (optional, or set EVM_RPC_POLYGON env var)
+        #[arg(long)]
+        evm_rpc_polygon: Option<String>,
+
+        /// EVM RPC URL for Arbitrum (optional, or set EVM_RPC_ARBITRUM env var)
+        #[arg(long)]
+        evm_rpc_arbitrum: Option<String>,
+
+        /// EVM RPC URL for Optimism (optional, or set EVM_RPC_OPTIMISM env var)
+        #[arg(long)]
+        evm_rpc_optimism: Option<String>,
+
+        /// EVM RPC URL for Avalanche (optional, or set EVM_RPC_AVALANCHE env var)
+        #[arg(long)]
+        evm_rpc_avalanche: Option<String>,
+
+        /// EVM RPC URL for Base (optional, or set EVM_RPC_BASE env var)
+        #[arg(long)]
+        evm_rpc_base: Option<String>,
+
+        /// EVM RPC URL for Gnosis (optional, or set EVM_RPC_GNOSIS env var)
+        #[arg(long)]
+        evm_rpc_gnosis: Option<String>,
+
+        /// EVM RPC URL for BNB Chain (optional, or set EVM_RPC_BNB env var)
+        #[arg(long)]
+        evm_rpc_bnb: Option<String>,
+
+        /// EVM RPC URL for Scroll (optional, or set EVM_RPC_SCROLL env var)
+        #[arg(long)]
+        evm_rpc_scroll: Option<String>,
+
+        /// EVM RPC URL for zkSync (optional, or set EVM_RPC_ZKSYNC env var)
+        #[arg(long)]
+        evm_rpc_zksync: Option<String>,
+
+        /// EVM RPC URL for Sonic (optional, or set EVM_RPC_SONIC env var)
+        #[arg(long)]
+        evm_rpc_sonic: Option<String>,
+
+        /// Global EVM RPC provider name (alchemy, infura, drpc, public)
+        /// Applies to all chains unless overridden by --evm-rpc-* or --evm-config
+        #[arg(long, env = "EVM_PROVIDER")]
+        evm_provider: Option<String>,
+
+        /// API key for the global EVM provider
+        #[arg(long, env = "EVM_PROVIDER_KEY")]
+        evm_provider_key: Option<String>,
+
+        /// Path to JSON config file for per-chain provider assignments
+        #[arg(long, env = "EVM_CONFIG")]
+        evm_config: Option<String>,
     },
     /// Manage API keys (admin CLI)
     Admin {
@@ -270,6 +327,20 @@ fn build_oauth_config(
     }
 }
 
+/// EVM provider configuration loaded from JSON
+#[derive(serde::Deserialize)]
+struct EvmConfig {
+    #[serde(default)]
+    chains: HashMap<String, crate::chains::evm::rpc::ChainProviderAssignment>,
+}
+
+/// Load EVM provider configuration from a JSON file
+fn load_evm_config(path: &str) -> Result<EvmConfig> {
+    let content = std::fs::read_to_string(path)?;
+    let config: EvmConfig = serde_json::from_str(&content)?;
+    Ok(config)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging (writes to stderr so it doesn't interfere with MCP stdio)
@@ -301,13 +372,27 @@ async fn main() -> Result<()> {
             github_client_secret,
             google_client_id,
             google_client_secret,
-            custom_oauth_provider,
-            custom_oauth_client_id,
-            custom_oauth_client_secret,
-            custom_oauth_auth_url,
-            custom_oauth_token_url,
-            custom_oauth_user_info_url,
-            custom_oauth_scopes,
+            custom_oauth_provider: _,
+            custom_oauth_client_id: _,
+            custom_oauth_client_secret: _,
+            custom_oauth_auth_url: _,
+            custom_oauth_token_url: _,
+            custom_oauth_user_info_url: _,
+            custom_oauth_scopes: _,
+            evm_rpc_ethereum,
+            evm_rpc_polygon,
+            evm_rpc_arbitrum,
+            evm_rpc_optimism,
+            evm_rpc_avalanche,
+            evm_rpc_base,
+            evm_rpc_gnosis,
+            evm_rpc_bnb,
+            evm_rpc_scroll,
+            evm_rpc_zksync,
+            evm_rpc_sonic,
+            evm_provider,
+            evm_provider_key,
+            evm_config,
         } => {
             tracing::info!("Starting apy-mcp server in HTTP mode");
 
@@ -343,7 +428,61 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            let tools = ApyMcpTools::new(&pool_id);
+            // Set up EVM RPC manager with provider support
+            let rpc = crate::chains::evm::rpc::RpcManager::new();
+
+            // 1. Set global default provider (if specified)
+            if let Some(ref provider_name) = evm_provider {
+                let key = evm_provider_key
+                    .or_else(|| {
+                        let env_key = format!("{}_KEY", provider_name.to_uppercase());
+                        std::env::var(&env_key).ok()
+                    });
+                rpc.set_default_provider(provider_name, key).await;
+            }
+
+            // 2. Load JSON config file for per-chain provider assignments
+            if let Some(ref config_path) = evm_config {
+                match load_evm_config(config_path) {
+                    Ok(config) => {
+                        for (chain, assignment) in &config.chains {
+                            rpc.set_chain_provider(chain, &assignment.provider, assignment.api_key.clone()).await;
+                        }
+                        tracing::info!(chains = config.chains.len(), "Loaded EVM config from file");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = config_path, "Failed to load EVM config file");
+                    }
+                }
+            }
+
+            // 3. Per-chain direct overrides (highest priority, via --evm-rpc-* or env vars)
+            macro_rules! set_rpc_url {
+                ($chain:expr, $cli_val:expr, $env_var:expr) => {
+                    if let Some(url) = $cli_val {
+                        rpc.set_rpc_url($chain, &url).await;
+                    } else if let Ok(url) = std::env::var($env_var) {
+                        rpc.set_rpc_url($chain, &url).await;
+                    }
+                };
+            }
+
+            set_rpc_url!("ethereum", evm_rpc_ethereum, "EVM_RPC_ETHEREUM");
+            set_rpc_url!("polygon", evm_rpc_polygon, "EVM_RPC_POLYGON");
+            set_rpc_url!("arbitrum", evm_rpc_arbitrum, "EVM_RPC_ARBITRUM");
+            set_rpc_url!("optimism", evm_rpc_optimism, "EVM_RPC_OPTIMISM");
+            set_rpc_url!("avalanche", evm_rpc_avalanche, "EVM_RPC_AVALANCHE");
+            set_rpc_url!("base", evm_rpc_base, "EVM_RPC_BASE");
+            set_rpc_url!("gnosis", evm_rpc_gnosis, "EVM_RPC_GNOSIS");
+            set_rpc_url!("bnb", evm_rpc_bnb, "EVM_RPC_BNB");
+            set_rpc_url!("scroll", evm_rpc_scroll, "EVM_RPC_SCROLL");
+            set_rpc_url!("zksync", evm_rpc_zksync, "EVM_RPC_ZKSYNC");
+            set_rpc_url!("sonic", evm_rpc_sonic, "EVM_RPC_SONIC");
+
+            // 4. Apply provider templates to resolve final URLs
+            rpc.apply_providers().await;
+
+            let tools = ApyMcpTools::with_rpc_manager_and_db(&pool_id, rpc, db.clone());
             let addr: std::net::SocketAddr = addr.parse()?;
 
             // Fall back to environment variable if not provided via CLI

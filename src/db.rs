@@ -29,7 +29,15 @@ pub struct ApiKeyStats {
     pub is_active: bool,
 }
 
-/// Database manager for API keys
+/// Cached rate data for a chain
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CachedRates {
+    pub chain: String,
+    pub data_json: String,
+    pub cached_at: String,
+}
+
+/// Database manager for API keys and rate cache
 #[derive(Clone)]
 pub struct Database {
     pub pool: SqlitePool,
@@ -64,6 +72,12 @@ impl Database {
 
             CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
             CREATE INDEX IF NOT EXISTS idx_api_keys_is_active ON api_keys(is_active);
+
+            CREATE TABLE IF NOT EXISTS rate_cache (
+                chain TEXT PRIMARY KEY,
+                data_json TEXT NOT NULL,
+                cached_at TEXT NOT NULL
+            );
             "#,
         )
         .execute(&pool)
@@ -193,5 +207,58 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected() > 0)
+    }
+
+    // ── Rate Cache ─────────────────────────────────────────────────────
+
+    /// Get cached rates for a chain if not expired
+    pub async fn get_cached_rates(&self, chain: &str, ttl_secs: i64) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query_as::<_, CachedRates>(
+            "SELECT chain, data_json, cached_at FROM rate_cache WHERE chain = ?",
+        )
+        .bind(chain)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(cached) => {
+                // Check if cache is still valid
+                if let Ok(cached_time) = chrono::DateTime::parse_from_rfc3339(&cached.cached_at) {
+                    let now = Utc::now();
+                    let age = now.signed_duration_since(cached_time);
+                    if age.num_seconds() < ttl_secs {
+                        tracing::debug!(chain = chain, age_secs = age.num_seconds(), "Cache hit");
+                        return Ok(Some(cached.data_json));
+                    }
+                }
+                tracing::debug!(chain = chain, "Cache expired");
+                Ok(None)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Store rates in cache
+    pub async fn set_cached_rates(&self, chain: &str, data_json: &str) -> Result<(), sqlx::Error> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT OR REPLACE INTO rate_cache (chain, data_json, cached_at) VALUES (?, ?, ?)",
+        )
+        .bind(chain)
+        .bind(data_json)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Clear expired cache entries
+    pub async fn clear_expired_cache(&self, ttl_secs: i64) -> Result<u64, sqlx::Error> {
+        let cutoff = (Utc::now() - chrono::Duration::seconds(ttl_secs)).to_rfc3339();
+        let result = sqlx::query("DELETE FROM rate_cache WHERE cached_at < ?")
+            .bind(&cutoff)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected())
     }
 }

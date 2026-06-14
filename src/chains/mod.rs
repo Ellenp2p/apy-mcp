@@ -1,4 +1,5 @@
 pub mod stellar;
+pub mod evm;
 
 #[allow(dead_code)]
 use anyhow::Result;

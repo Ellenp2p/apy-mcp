@@ -622,6 +622,14 @@ pub async fn start_http_server(
         .route(
             "/admin/oauth/providers/{id}/reactivate",
             post(crate::admin::reactivate_oauth_provider),
+        )
+        .route(
+            "/admin/rpc/providers",
+            get(crate::admin::list_rpc_providers),
+        )
+        .route(
+            "/admin/rpc/status",
+            get(crate::admin::get_rpc_status),
         );
 
     // Build MCP service - configure allowed hosts from base_url

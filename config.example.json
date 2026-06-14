@@ -1,0 +1,16 @@
+{
+  "chains": {
+    "ethereum": { "provider": "alchemy", "api_key": "your-alchemy-key" },
+    "polygon": { "provider": "alchemy", "api_key": "your-alchemy-key" },
+    "arbitrum": { "provider": "infura", "api_key": "your-infura-key" },
+    "optimism": { "provider": "alchemy", "api_key": "your-alchemy-key" },
+    "base": { "provider": "alchemy", "api_key": "your-alchemy-key" },
+    "avalanche": { "provider": "public" },
+    "gnosis": { "provider": "public" },
+    "bnb": { "provider": "public" },
+    "fantom": { "provider": "public" },
+    "scroll": { "provider": "drpc", "api_key": "your-drpc-key" },
+    "zksync": { "provider": "public" },
+    "linea": { "provider": "drpc", "api_key": "your-drpc-key" }
+  }
+}

@@ -318,6 +318,54 @@ pub async fn reactivate_oauth_provider(
     Ok(StatusCode::OK)
 }
 
+// ── RPC Provider Management ──────────────────────────────────────────
+
+/// List all available RPC providers
+pub async fn list_rpc_providers(
+    State(_state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    validate_admin_token(&headers, &_state.admin_token)?;
+
+    let providers = crate::chains::evm::providers::builtin_providers();
+    let provider_list: Vec<serde_json::Value> = providers
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "needs_key": p.needs_key,
+                "supported_chains": p.supported_chains(),
+            })
+        })
+        .collect();
+
+    // Also include current config
+    let default_provider = _state.tools.state.aave_provider.get_rpc_manager()
+        .get_default_provider()
+        .await;
+
+    Ok(axum::Json(serde_json::json!({
+        "providers": provider_list,
+        "default": default_provider.map(|(name, _)| name),
+    })))
+}
+
+/// Check RPC health status for all chains
+pub async fn get_rpc_status(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    // Get the RPC manager from AaveProvider
+    let rpc = state.tools.state.aave_provider.get_rpc_manager();
+    let statuses = rpc.check_all_chains_health().await;
+
+    Ok(axum::Json(serde_json::json!({
+        "chains": statuses
+    })))
+}
+
 /// Build the admin routes (no state type parameter - merged with main router)
 pub fn admin_routes() -> Router<crate::http::HttpState> {
     Router::new()
@@ -326,4 +374,6 @@ pub fn admin_routes() -> Router<crate::http::HttpState> {
         .route("/keys/{key_id}/deactivate", delete(deactivate_key))
         .route("/keys/{key_id}/reactivate", post(reactivate_key))
         .route("/stats", get(get_stats))
+        .route("/rpc/providers", get(list_rpc_providers))
+        .route("/rpc/status", get(get_rpc_status))
 }
