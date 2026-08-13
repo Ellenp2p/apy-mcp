@@ -60,7 +60,11 @@ impl AaveProvider {
 
         // Step 1: Get all reserve tokens (symbol + address)
         let tokens = aave::get_all_reserves_tokens(&self.rpc, chain_name, provider).await?;
-        info!(chain = chain_name, count = tokens.len(), "Got reserve tokens");
+        info!(
+            chain = chain_name,
+            count = tokens.len(),
+            "Got reserve tokens"
+        );
 
         // Step 2: Get reserve data for ALL tokens concurrently (with bounded concurrency)
         let mut all_results = Vec::with_capacity(tokens.len());

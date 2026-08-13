@@ -74,6 +74,19 @@ fn extract_custom_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     custom
 }
 
+/// Apply the sliding-window rate limiter for a given key
+async fn check_rate_limit(state: &HttpState, key: &str, limit: usize) -> Result<(), StatusCode> {
+    let mut limiters = state.rate_limiters.write().await;
+    let limiter = limiters
+        .entry(key.to_string())
+        .or_insert_with(|| RateLimiter::new(limit));
+    if !limiter.check_and_record() {
+        tracing::warn!(key = %key, "Rate limit exceeded");
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    Ok(())
+}
+
 /// API Key authentication middleware with rate limiting
 async fn auth_middleware(
     State(state): State<HttpState>,
@@ -92,6 +105,9 @@ async fn auth_middleware(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
+    // Default rate limit for OAuth-authenticated requests (per user)
+    const OAUTH_RATE_LIMIT: usize = 60;
+
     // 1. Check if it's an OAuth access token (from /oauth/token)
     let oauth_token = sqlx::query_as::<_, (String, String, String, Option<String>)>(
         "SELECT token, user_id, client_id, scope FROM oauth_access_tokens WHERE token = ? AND expires_at > ?",
@@ -107,6 +123,37 @@ async fn auth_middleware(
 
     if let Some((_token, user_id, _client_id, _scope)) = oauth_token {
         tracing::debug!(user_id = %user_id, "OAuth access token validated");
+
+        // Resolve the GitHub user (login + UID) so both username and UID allowlists work
+        let (gh_login, gh_id) = match sqlx::query_as::<_, (String, String)>(
+            "SELECT login, id FROM oauth_users WHERE login = ? AND provider = 'github'",
+        )
+        .bind(&user_id)
+        .fetch_optional(&state.db.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to query oauth_users for GitHub user");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })? {
+            Some((login, id)) => (login, id),
+            None => (user_id.clone(), String::new()),
+        };
+
+        // Allowlist enforcement
+        let allowed = state
+            .db
+            .is_github_allowed(&gh_login, &gh_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to check GitHub allowlist");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        if !allowed {
+            tracing::warn!(login = %gh_login, github_id = %gh_id, "GitHub user not in allowlist - access denied");
+            return Err(StatusCode::FORBIDDEN);
+        }
+
+        check_rate_limit(&state, &format!("oauth:{}", user_id), OAUTH_RATE_LIMIT).await?;
 
         let custom_headers = extract_custom_headers(&headers);
         request
@@ -128,9 +175,22 @@ async fn auth_middleware(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if let Some((_id, login, _name, _email, _avatar)) = github_user {
-        // GitHub OAuth token is valid, allow request
-        tracing::debug!(login = %login, "GitHub OAuth token validated");
+    if let Some((github_id, login, _name, _email, _avatar)) = github_user {
+        // GitHub OAuth token is valid - enforce allowlist (login OR UID)
+        let allowed = state
+            .db
+            .is_github_allowed(&login, &github_id)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to check GitHub allowlist");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        if !allowed {
+            tracing::warn!(login = %login, github_id = %github_id, "GitHub user not in allowlist - access denied");
+            return Err(StatusCode::FORBIDDEN);
+        }
+
+        check_rate_limit(&state, &format!("github:{}", github_id), OAUTH_RATE_LIMIT).await?;
 
         // Extract custom headers for logging
         let custom_headers = extract_custom_headers(&headers);
@@ -161,19 +221,7 @@ async fn auth_middleware(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // Check rate limit
-    let mut limiters = state.rate_limiters.write().await;
-    let limiter = limiters
-        .entry(api_key.id.clone())
-        .or_insert_with(|| RateLimiter::new(api_key.rate_limit as usize));
-
-    if !limiter.check_and_record() {
-        tracing::warn!(
-            key_id = %api_key.id,
-            key_name = %api_key.name,
-            "Rate limit exceeded"
-        );
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
+    check_rate_limit(&state, &api_key.id, api_key.rate_limit as usize).await?;
 
     // Record usage in database
     let db = state.db.clone();
@@ -260,38 +308,30 @@ async fn oauth_authorize_handler(
     let code_challenge = params.get("code_challenge").cloned().unwrap_or_default();
     let scope = params.get("scope").cloned().unwrap_or_default();
 
-    // Query available OAuth providers from database
+    // Query available OAuth providers from database (only GitHub is supported)
     let providers = crate::oauth::OAuthProvider::list(&http_state.db.pool)
         .await
         .unwrap_or_default();
-    let active_providers: Vec<_> = providers
+    let github_configured = providers
         .iter()
-        .filter(|p| p.is_active && p.client_id.is_some())
-        .collect();
+        .any(|p| p.name == "github" && p.is_active && p.client_id.is_some());
 
-    // Build social login buttons
+    // Build the GitHub login button
     let mut social_buttons = String::new();
-    for provider in &active_providers {
-        let (icon, bg_color) = match provider.name.as_str() {
-            "github" => ("🐙", "#24292e"),
-            "google" => ("🔍", "#4285f4"),
-            _ => ("🔐", "#6c5ce7"),
-        };
+    if github_configured {
         social_buttons.push_str(&format!(
-            r#"<a href="/auth/{}?client_id={}&redirect_uri={}&state={}&code_challenge={}&scope={}" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: {}; color: white; font-size: 16px; cursor: pointer; text-decoration: none; margin-bottom: 8px; box-sizing: border-box;">{} {}</a>"#,
-            provider.name,
+            r#"<a href="/auth/github?client_id={}&redirect_uri={}&state={}&code_challenge={}&scope={}" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: #24292e; color: white; font-size: 16px; cursor: pointer; text-decoration: none; margin-bottom: 8px; box-sizing: border-box;">🐙 GitHub</a>"#,
             urlencoding::encode(&client_id),
             urlencoding::encode(&redirect_uri),
             urlencoding::encode(&state),
             urlencoding::encode(&code_challenge),
             urlencoding::encode(&scope),
-            bg_color, icon, capitalize(&provider.name)
         ));
     }
 
     // If no providers configured, show a message
     let no_providers_msg = if social_buttons.is_empty() {
-        r#"<div style="background: rgba(255,193,7,0.15); color: #ffc107; padding: 12px; border-radius: 8px; font-size: 14px; text-align: center;">No login providers configured. Please set up GitHub or Google OAuth in the admin panel.</div>"#
+        r#"<div style="background: rgba(255,193,7,0.15); color: #ffc107; padding: 12px; border-radius: 8px; font-size: 14px; text-align: center;">No login providers configured. Please set up GitHub OAuth in the admin panel.</div>"#
     } else {
         ""
     };
@@ -331,15 +371,6 @@ async fn oauth_authorize_handler(
     );
 
     Ok(axum::response::Html(html))
-}
-
-/// Capitalize first letter of a string
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        None => String::new(),
-        Some(f) => f.to_uppercase().to_string() + c.as_str(),
-    }
 }
 
 /// RFC 7591 - Dynamic Client Registration
@@ -583,10 +614,7 @@ pub async fn start_http_server(
             "/.well-known/oauth-protected-resource",
             get(protected_resource_metadata_handler),
         )
-        .route(
-            "/oauth/authorize",
-            get(oauth_authorize_handler),
-        )
+        .route("/oauth/authorize", get(oauth_authorize_handler))
         .route("/oauth/register", post(oauth_register_handler))
         .route("/oauth/token", post(oauth_token_handler))
         .route(
@@ -627,9 +655,14 @@ pub async fn start_http_server(
             "/admin/rpc/providers",
             get(crate::admin::list_rpc_providers),
         )
+        .route("/admin/rpc/status", get(crate::admin::get_rpc_status))
         .route(
-            "/admin/rpc/status",
-            get(crate::admin::get_rpc_status),
+            "/admin/github/allowlist",
+            get(crate::admin::list_github_allowlist).post(crate::admin::add_github_allowlist),
+        )
+        .route(
+            "/admin/github/allowlist/{value}",
+            delete(crate::admin::remove_github_allowlist),
         );
 
     // Build MCP service - configure allowed hosts from base_url
@@ -654,8 +687,7 @@ pub async fn start_http_server(
         StreamableHttpService::new(
             move || Ok(tools_for_service.clone()),
             LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default()
-                .with_allowed_hosts(allowed_hosts),
+            StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts),
         );
 
     // Build MCP routes (auth required) - use nest_service like official example

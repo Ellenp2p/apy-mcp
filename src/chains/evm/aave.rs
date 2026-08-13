@@ -92,8 +92,8 @@ pub async fn get_reserve_data(
         .await
         .context(format!("Failed to call getReserveData for {:?}", asset))?;
 
-    let reserve = decode_reserve_data(&result)
-        .context("Failed to decode getReserveData() response")?;
+    let reserve =
+        decode_reserve_data(&result).context("Failed to decode getReserveData() response")?;
     Ok(reserve)
 }
 
@@ -151,7 +151,10 @@ fn decode_token_data_array(data: &[u8]) -> Result<Vec<TokenInfo>> {
 
     for (addr_word, addr) in &address_positions {
         let symbol = find_string_near_address(data, *addr_word, num_words);
-        tokens.push(TokenInfo { symbol, address: *addr });
+        tokens.push(TokenInfo {
+            symbol,
+            address: *addr,
+        });
     }
 
     Ok(tokens)
@@ -187,7 +190,13 @@ fn find_string_near_address(data: &[u8], addr_word: usize, num_words: usize) -> 
 
     // Fallback: use a short address string
     let addr = read_address(data, addr_word * 32).unwrap_or(H160::zero());
-    format!("0x{}", hex::encode(addr.as_bytes()).chars().take(8).collect::<String>())
+    format!(
+        "0x{}",
+        hex::encode(addr.as_bytes())
+            .chars()
+            .take(8)
+            .collect::<String>()
+    )
 }
 
 /// Decode getReserveData() response
@@ -262,7 +271,12 @@ fn read_address(data: &[u8], offset: usize) -> Result<H160> {
 /// Read raw bytes from ABI-encoded data at a byte offset
 fn read_bytes(data: &[u8], offset: usize, len: usize) -> Result<Vec<u8>> {
     if offset + len > data.len() {
-        bail!("read_bytes out of bounds: offset={}, len={}, data_len={}", offset, len, data.len());
+        bail!(
+            "read_bytes out of bounds: offset={}, len={}, data_len={}",
+            offset,
+            len,
+            data.len()
+        );
     }
     Ok(data[offset..offset + len].to_vec())
 }
@@ -293,7 +307,10 @@ mod tests {
         assert_eq!(reserve.unbacked, 0);
         assert!(reserve.total_a_token > 0, "total_a_token should be > 0");
         assert!(reserve.liquidity_rate > 0, "liquidity_rate should be > 0");
-        assert!(reserve.variable_borrow_rate > 0, "variable_borrow_rate should be > 0");
+        assert!(
+            reserve.variable_borrow_rate > 0,
+            "variable_borrow_rate should be > 0"
+        );
 
         // Verify rate calculations
         let ray: f64 = 1e27;
@@ -302,8 +319,16 @@ mod tests {
         let supply_apy = supply_apr.exp() - 1.0;
         let borrow_apy = borrow_apr.exp() - 1.0;
 
-        assert!(supply_apy > 0.0 && supply_apy < 0.5, "supply APY out of range: {}", supply_apy);
-        assert!(borrow_apy > 0.0 && borrow_apy < 0.5, "borrow APY out of range: {}", borrow_apy);
+        assert!(
+            supply_apy > 0.0 && supply_apy < 0.5,
+            "supply APY out of range: {}",
+            supply_apy
+        );
+        assert!(
+            borrow_apy > 0.0 && borrow_apy < 0.5,
+            "borrow APY out of range: {}",
+            borrow_apy
+        );
 
         println!("USDC on Optimism:");
         println!("  Total Supply: {} (raw)", reserve.total_a_token);
@@ -314,28 +339,44 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live RPC with a real Alchemy key (ALCHEMY_TEST_KEY env var)"]
     async fn test_live_optimism_usdc() {
-        // Use the Alchemy RPC to fetch live data from Optimism
+        // Live-network test - requires ALCHEMY_TEST_KEY. Ignored by default in CI.
+        let api_key = std::env::var("ALCHEMY_TEST_KEY").expect("ALCHEMY_TEST_KEY not set");
         let rpc = super::super::rpc::RpcManager::new();
-        rpc.set_rpc_url("optimism", "https://opt-mainnet.g.alchemy.com/v2/WLozhnfMTkMYrcSq3T-My").await;
+        rpc.set_rpc_url(
+            "optimism",
+            &format!("https://opt-mainnet.g.alchemy.com/v2/{}", api_key),
+        )
+        .await;
 
-        let provider = H160::from_slice(&hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap());
-        let usdc = H160::from_slice(&hex::decode("0b2C639c533813f4Aa9D7837CAf62653d097Ff85").unwrap());
+        let provider =
+            H160::from_slice(&hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap());
+        let usdc =
+            H160::from_slice(&hex::decode("0b2C639c533813f4Aa9D7837CAf62653d097Ff85").unwrap());
 
         // Step 1: Get all reserves
-        let tokens = get_all_reserves_tokens(&rpc, "optimism", provider).await.unwrap();
+        let tokens = get_all_reserves_tokens(&rpc, "optimism", provider)
+            .await
+            .unwrap();
         println!("=== Optimism: {} reserves ===", tokens.len());
         for t in &tokens {
             println!("  {}: {:?}", t.symbol, t.address);
         }
 
         // Step 2: Get USDC reserve data
-        let reserve = get_reserve_data(&rpc, "optimism", provider, usdc).await.unwrap();
+        let reserve = get_reserve_data(&rpc, "optimism", provider, usdc)
+            .await
+            .unwrap();
 
         let ray: f64 = 1e27;
         let total_supply = reserve.total_a_token as f64 / 1e6; // USDC = 6 decimals
         let total_borrow = (reserve.total_stable_debt + reserve.total_variable_debt) as f64 / 1e6;
-        let util = if total_supply > 0.0 { total_borrow / total_supply } else { 0.0 };
+        let util = if total_supply > 0.0 {
+            total_borrow / total_supply
+        } else {
+            0.0
+        };
 
         let supply_apr = reserve.liquidity_rate as f64 / ray;
         let borrow_apr = reserve.variable_borrow_rate as f64 / ray;

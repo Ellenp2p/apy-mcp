@@ -8,25 +8,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-/// OAuth provider configuration (for backward compatibility with CLI args)
-#[derive(Clone, Debug)]
-pub struct OAuthProviderConfig {
-    pub name: String,
-    pub client_id: String,
-    pub client_secret: String,
-    pub auth_url: String,
-    pub token_url: String,
-    pub user_info_url: String,
-    pub scopes: Vec<String>,
-}
-
-/// OAuth configuration for all providers (for backward compatibility)
-#[derive(Clone)]
-pub struct OAuthConfig {
-    pub providers: std::collections::HashMap<String, OAuthProviderConfig>,
-    pub base_url: String,
-}
-
 /// Combined state for OAuth routes
 #[derive(Clone)]
 pub struct OAuthState {
@@ -67,17 +48,6 @@ pub struct OAuthProvider {
     pub client_secret: Option<String>,
     pub scopes: String,
     pub is_dynamic: bool,
-    pub is_active: bool,
-    pub created_at: String,
-}
-
-/// User account for local authentication
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct User {
-    pub id: i64,
-    pub username: String,
-    pub password_hash: String,
-    pub email: Option<String>,
     pub is_active: bool,
     pub created_at: String,
 }
@@ -202,12 +172,10 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             created_at TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            email TEXT,
-            is_active INTEGER DEFAULT 1,
+        CREATE TABLE IF NOT EXISTS github_allowlist (
+            value TEXT PRIMARY KEY,
+            kind TEXT NOT NULL DEFAULT 'username',
+            note TEXT,
             created_at TEXT NOT NULL
         );
         "#,
@@ -217,15 +185,12 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Initialize default OAuth providers from CLI args / environment variables
-/// CLI args take priority; falls back to env vars (GITHUB_CLIENT_ID/SECRET, GOOGLE_CLIENT_ID/SECRET)
+/// Initialize the default GitHub OAuth provider from CLI args / environment variables
+/// CLI args take priority; falls back to env vars (GITHUB_CLIENT_ID/SECRET)
 pub async fn init_default_providers(
     pool: &SqlitePool,
-    _base_url: &str,
     github_client_id: Option<&str>,
     github_client_secret: Option<&str>,
-    google_client_id: Option<&str>,
-    google_client_secret: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let now = chrono::Utc::now().to_rfc3339();
 
@@ -254,38 +219,6 @@ pub async fn init_default_providers(
         // Update if already exists
         sqlx::query(
             "UPDATE oauth_providers SET client_id = ?, client_secret = ?, is_active = 1 WHERE name = 'github'",
-        )
-        .bind(&client_id)
-        .bind(&client_secret)
-        .execute(pool)
-        .await?;
-    }
-
-    // Google OAuth (CLI args > env vars)
-    let gg_id = google_client_id
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("GOOGLE_CLIENT_ID").ok());
-    let gg_secret = google_client_secret
-        .map(|s| s.to_string())
-        .or_else(|| std::env::var("GOOGLE_CLIENT_SECRET").ok());
-
-    if let (Some(client_id), Some(client_secret)) = (gg_id, gg_secret) {
-        tracing::info!("Configuring Google OAuth provider");
-        sqlx::query(
-            r#"
-            INSERT OR IGNORE INTO oauth_providers (name, issuer, auth_url, token_url, user_info_url, client_id, client_secret, scopes, is_dynamic, is_active, created_at)
-            VALUES ('google', 'https://accounts.google.com', 'https://accounts.google.com/o/oauth2/v2/auth', 'https://oauth2.googleapis.com/token', 'https://www.googleapis.com/oauth2/v2/userinfo', ?, ?, 'openid,email,profile', 0, 1, ?)
-            "#,
-        )
-        .bind(&client_id)
-        .bind(&client_secret)
-        .bind(&now)
-        .execute(pool)
-        .await?;
-
-        // Update if already exists
-        sqlx::query(
-            "UPDATE oauth_providers SET client_id = ?, client_secret = ?, is_active = 1 WHERE name = 'google'",
         )
         .bind(&client_id)
         .bind(&client_secret)
@@ -502,78 +435,6 @@ impl OAuthProvider {
     }
 }
 
-impl User {
-    /// Hash a password
-    pub fn hash_password(password: &str) -> String {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(password.as_bytes());
-        hex::encode(hasher.finalize())
-    }
-
-    /// Verify a password
-    pub fn verify_password(password: &str, hash: &str) -> bool {
-        Self::hash_password(password) == hash
-    }
-
-    /// Create a new user
-    pub async fn create(
-        pool: &SqlitePool,
-        username: &str,
-        password: &str,
-        email: Option<&str>,
-    ) -> Result<Self, sqlx::Error> {
-        let password_hash = Self::hash_password(password);
-        let now = chrono::Utc::now().to_rfc3339();
-
-        sqlx::query(
-            "INSERT INTO users (username, password_hash, email, is_active, created_at) VALUES (?, ?, ?, 1, ?)",
-        )
-        .bind(username)
-        .bind(&password_hash)
-        .bind(email)
-        .bind(&now)
-        .execute(pool)
-        .await?;
-
-        Self::get_by_username(pool, username)
-            .await?
-            .ok_or_else(|| sqlx::Error::RowNotFound)
-    }
-
-    /// Get user by username
-    pub async fn get_by_username(
-        pool: &SqlitePool,
-        username: &str,
-    ) -> Result<Option<Self>, sqlx::Error> {
-        let user =
-            sqlx::query_as::<_, Self>("SELECT * FROM users WHERE username = ? AND is_active = 1")
-                .bind(username)
-                .fetch_optional(pool)
-                .await?;
-        Ok(user)
-    }
-
-    /// Authenticate user
-    pub async fn authenticate(
-        pool: &SqlitePool,
-        username: &str,
-        password: &str,
-    ) -> Result<Option<Self>, sqlx::Error> {
-        let user = Self::get_by_username(pool, username).await?;
-        match user {
-            Some(user) => {
-                if Self::verify_password(password, &user.password_hash) {
-                    Ok(Some(user))
-                } else {
-                    Ok(None)
-                }
-            }
-            None => Ok(None),
-        }
-    }
-}
-
 /// Generate a random CSRF token
 fn generate_csrf_token() -> String {
     use sha2::{Digest, Sha256};
@@ -583,162 +444,18 @@ fn generate_csrf_token() -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Build OAuth authorization URL for any provider
-fn build_auth_url(provider: &OAuthProviderConfig, csrf_token: &str, redirect_uri: &str) -> String {
-    let scopes = provider.scopes.join(" ");
-    let redirect = urlencoding::encode(redirect_uri);
-
-    format!(
-        "{}?client_id={}&redirect_uri={}&scope={}&state={}&response_type=code",
-        provider.auth_url,
-        provider.client_id,
-        redirect,
-        urlencoding::encode(&scopes),
-        csrf_token
-    )
-}
-
-/// Exchange authorization code for access token
-async fn exchange_code(provider: &OAuthProviderConfig, code: &str) -> Result<String, StatusCode> {
-    let client = reqwest::Client::new();
-
-    let mut params = std::collections::HashMap::new();
-    params.insert("client_id", provider.client_id.as_str());
-    params.insert("client_secret", provider.client_secret.as_str());
-    params.insert("code", code);
-    params.insert("grant_type", "authorization_code");
-
-    tracing::debug!(token_url = %provider.token_url, client_id = %provider.client_id, "Exchanging code for token");
-
-    let token_response = client
-        .post(&provider.token_url)
-        .header("Accept", "application/json")
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, url = %provider.token_url, "Token exchange HTTP request failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let status = token_response.status();
-    let token_body: serde_json::Value = token_response.json().await.map_err(|e| {
-        tracing::error!(error = %e, status = %status, "Failed to parse token response JSON");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    tracing::debug!(status = %status, body = %token_body, "Token exchange response");
-
-    // Try different token field names (access_token for most, id_token for some)
-    let access_token = token_body
-        .get("access_token")
-        .or_else(|| token_body.get("id_token"))
-        .and_then(|v| v.as_str())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    Ok(access_token.to_string())
-}
-
-/// Get user info from provider
-async fn get_user_info(
-    provider: &OAuthProviderConfig,
-    access_token: &str,
-) -> Result<OAuthUser, StatusCode> {
-    let client = reqwest::Client::new();
-
-    let response = match provider.name.as_str() {
-        "github" => {
-            client
-                .get(&provider.user_info_url)
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("User-Agent", "apy-mcp")
-                .send()
-                .await
-        }
-        "google" => {
-            client
-                .get(&provider.user_info_url)
-                .header("Authorization", format!("Bearer {}", access_token))
-                .send()
-                .await
-        }
-        _ => {
-            // Custom provider - try standard Bearer token
-            client
-                .get(&provider.user_info_url)
-                .header("Authorization", format!("Bearer {}", access_token))
-                .send()
-                .await
-        }
-    }
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let user_info: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Parse user info based on provider
-    let user = match provider.name.as_str() {
-        "github" => OAuthUser {
-            id: user_info["id"].as_i64().unwrap_or(0).to_string(),
-            provider: "github".to_string(),
-            login: user_info["login"].as_str().unwrap_or("").to_string(),
-            name: user_info["name"].as_str().map(|s| s.to_string()),
-            email: user_info["email"].as_str().map(|s| s.to_string()),
-            avatar_url: user_info["avatar_url"].as_str().map(|s| s.to_string()),
-        },
-        "google" => OAuthUser {
-            id: user_info["sub"].as_str().unwrap_or("").to_string(),
-            provider: "google".to_string(),
-            login: user_info["email"].as_str().unwrap_or("").to_string(),
-            name: user_info["name"].as_str().map(|s| s.to_string()),
-            email: user_info["email"].as_str().map(|s| s.to_string()),
-            avatar_url: user_info["picture"].as_str().map(|s| s.to_string()),
-        },
-        _ => {
-            // Custom provider - try common fields
-            let id = user_info["id"]
-                .as_str()
-                .or_else(|| user_info["sub"].as_str())
-                .or_else(|| user_info["user_id"].as_str())
-                .unwrap_or("")
-                .to_string();
-
-            let login = user_info["login"]
-                .as_str()
-                .or_else(|| user_info["username"].as_str())
-                .or_else(|| user_info["email"].as_str())
-                .unwrap_or("")
-                .to_string();
-
-            OAuthUser {
-                id,
-                provider: provider.name.clone(),
-                login,
-                name: user_info["name"]
-                    .as_str()
-                    .or_else(|| user_info["display_name"].as_str())
-                    .map(|s| s.to_string()),
-                email: user_info["email"].as_str().map(|s| s.to_string()),
-                avatar_url: user_info["avatar_url"]
-                    .as_str()
-                    .or_else(|| user_info["picture"].as_str())
-                    .or_else(|| user_info["profile_image_url"].as_str())
-                    .map(|s| s.to_string()),
-            }
-        }
-    };
-
-    Ok(user)
-}
-
 /// Start OAuth flow for any provider
 async fn oauth_auth(
     State(state): State<OAuthState>,
     Path(provider_name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Redirect, StatusCode> {
+    // Only GitHub login is supported
+    if provider_name != "github" {
+        tracing::warn!(provider = %provider_name, "Rejected non-GitHub OAuth provider");
+        return Ok(Redirect::to("/?error=provider_not_supported"));
+    }
+
     // Look up provider from database
     let provider = OAuthProvider::get_by_name(&state.pool, &provider_name)
         .await
@@ -805,6 +522,12 @@ async fn oauth_callback(
     Path(provider_name): Path<String>,
     Query(callback): Query<OAuthCallback>,
 ) -> Result<Response, StatusCode> {
+    // Only GitHub login is supported
+    if provider_name != "github" {
+        tracing::warn!(provider = %provider_name, "Rejected non-GitHub OAuth callback");
+        return Ok(Redirect::to("/?error=provider_not_supported").into_response());
+    }
+
     // Check for error
     if let Some(error) = callback.error {
         tracing::warn!(error = %error, provider = %provider_name, "OAuth callback error");
@@ -970,6 +693,26 @@ async fn oauth_callback(
             .or_else(|| user_info["profile_image_url"].as_str())
             .map(|s| s.to_string()),
     };
+
+    // Enforce GitHub allowlist (login or UID must be in the allowlist when it is non-empty)
+    let db = crate::db::Database {
+        pool: state.pool.clone(),
+    };
+    let allowed = db
+        .is_github_allowed(&oauth_user.login, &oauth_user.id)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Failed to check GitHub allowlist");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if !allowed {
+        tracing::warn!(
+            login = %oauth_user.login,
+            github_id = %oauth_user.id,
+            "GitHub user not in allowlist - login denied"
+        );
+        return Ok(Redirect::to("/?error=not_allowed").into_response());
+    }
 
     // Store or update user in database
     let now = chrono::Utc::now().to_rfc3339();

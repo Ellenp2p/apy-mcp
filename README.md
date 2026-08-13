@@ -12,8 +12,9 @@ Currently supported:
 - Multi-asset pool support (USDC, XLM, EURC, etc.)
 - Backstop rate integration
 - **API Key management** with admin dashboard
-- **GitHub OAuth login** (一键登录)
-- **Rate limiting** per API key
+- **GitHub OAuth login** (sole login method)
+- **GitHub access control** — allowlist by GitHub username or UID (env var + Admin API)
+- **Rate limiting** per API key / per OAuth user
 - **Custom header support** (X-Poke-User-Id, etc.) with logging
 - **SQLite database** for persistent storage
 
@@ -58,13 +59,19 @@ Add to `claude_desktop_config.json`:
 # With admin token for management
 cargo run -- http --addr 0.0.0.0:3000 --admin-token your-admin-secret
 
-# With GitHub OAuth (optional)
+# With GitHub OAuth + access control
 cargo run -- http \
   --addr 0.0.0.0:3000 \
+  --base-url https://mcp.example.com \
   --admin-token your-admin-secret \
   --github-client-id YOUR_GITHUB_CLIENT_ID \
-  --github-client-secret YOUR_GITHUB_CLIENT_SECRET
+  --github-client-secret YOUR_GITHUB_CLIENT_SECRET \
+  --allowed-github-users octocat,583231
 ```
+
+> **Production**: `--admin-token` is REQUIRED (without it the admin API is open).
+> `--base-url` must be your public HTTPS URL, otherwise OAuth redirects break.
+> All EVM chains use **Alchemy** by default — set `ALCHEMY_KEY` (one key covers all 11 chains).
 
 ### Docker
 
@@ -72,22 +79,39 @@ cargo run -- http \
 # Build
 docker build -t apy-mcp .
 
-# Run with admin token
-docker run -p 3000:3000 -e ADMIN_TOKEN=your-admin-secret apy-mcp
-
-# Run with GitHub OAuth
+# Run with GitHub OAuth + access control
 docker run -p 3000:3000 \
+  -e BASE_URL=https://mcp.example.com \
   -e ADMIN_TOKEN=your-admin-secret \
   -e GITHUB_CLIENT_ID=your_client_id \
   -e GITHUB_CLIENT_SECRET=your_client_secret \
+  -e ALLOWED_GITHUB_USERS=octocat,583231 \
+  -e ALCHEMY_KEY=your_alchemy_key \
   apy-mcp
 
 # Or use docker-compose
 ADMIN_TOKEN=your-admin-secret \
+BASE_URL=https://mcp.example.com \
 GITHUB_CLIENT_ID=your_client_id \
 GITHUB_CLIENT_SECRET=your_client_secret \
+ALLOWED_GITHUB_USERS=octocat,583231 \
+ALCHEMY_KEY=your_alchemy_key \
 docker-compose up
 ```
+
+## EVM RPC Providers
+
+By default all 11 EVM chains (ethereum, polygon, arbitrum, optimism, avalanche, base,
+gnosis, bnb, scroll, zksync, sonic) use **Alchemy** with a single key:
+
+```bash
+ALCHEMY_KEY=your_key cargo run -- http ...   # or --evm-provider-key your_key
+```
+
+- No `ALCHEMY_KEY` set → falls back to public RPCs (rate-limited, not for production).
+- Override the provider: `--evm-provider public|infura|drpc|alchemy`.
+- Override one chain only: `--evm-rpc-optimism https://...` (always wins over provider).
+- Per-chain assignments via JSON config: `--evm-config config.json` (see `config.example.json`).
 
 ### Endpoints
 
@@ -104,64 +128,70 @@ docker-compose up
 | `/admin/keys/{id}/deactivate` | DELETE | Admin Token | Deactivate API key |
 | `/admin/keys/{id}/reactivate` | POST | Admin Token | Reactivate API key |
 | `/admin/stats` | GET | Admin Token | Usage statistics |
+| `/admin/github/allowlist` | GET | Admin Token | List GitHub allowlist entries |
+| `/admin/github/allowlist` | POST | Admin Token | Add GitHub username/UID to allowlist |
+| `/admin/github/allowlist/{value}` | DELETE | Admin Token | Remove entry from allowlist |
 
-## OAuth Setup (RFC 7591 Dynamic Client Registration)
+## GitHub OAuth Login
 
-### 方式一：动态注册（推荐）
-
-支持 RFC 7591 的 OAuth Provider 可以自动注册客户端，无需手动配置 `client_id` 和 `client_secret`。
-
-```bash
-# 通过 Admin API 动态添加 Provider
-curl -X POST http://localhost:3000/admin/oauth/providers \
-  -H "Authorization: Bearer your-admin-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "keycloak",
-    "issuer": "https://your-keycloak.com/realms/master"
-  }'
-```
-
-服务器会自动：
-1. 发现 OAuth 端点 (RFC 8414)
-2. 注册为客户端 (RFC 7591)
-3. 存储 `client_id` 和 `client_secret`
-
-### 方式二：手动配置
+GitHub OAuth is the **only** login method. Configure it via CLI args or env vars:
 
 ```bash
-curl -X POST http://localhost:3000/admin/oauth/providers \
-  -H "Authorization: Bearer your-admin-token" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "github",
-    "auth_url": "https://github.com/login/oauth/authorize",
-    "token_url": "https://github.com/login/oauth/access_token",
-    "user_info_url": "https://api.github.com/user",
-    "client_id": "YOUR_CLIENT_ID",
-    "client_secret": "YOUR_CLIENT_SECRET",
-    "scopes": "read:user,user:email"
-  }'
+# Environment variables
+GITHUB_CLIENT_ID=your_client_id
+GITHUB_CLIENT_SECRET=your_client_secret
 ```
 
-### 管理 OAuth Providers
+The provider is created automatically at startup (`/auth/github` → GitHub → callback).
+You can also manage providers from the admin panel, but only `github` is accepted by the
+login flow.
 
-```bash
-# 列出所有 Providers
-curl http://localhost:3000/admin/oauth/providers \
-  -H "Authorization: Bearer your-admin-token"
-
-# 删除 Provider
-curl -X DELETE http://localhost:3000/admin/oauth/providers/1 \
-  -H "Authorization: Bearer your-admin-token"
-```
-
-### 登录
+Login flow:
 
 ```
 http://localhost:3000/auth/github    → GitHub 登录
-http://localhost:3000/auth/google    → Google 登录
-http://localhost:3000/auth/keycloak  → Keycloak 登录
+```
+
+## GitHub Access Control (Allowlist)
+
+Control **who** can log in / use the service by GitHub **username** or **UID**.
+Enforced at two levels:
+1. **Login** — OAuth callback denies users not in the allowlist.
+2. **Requests** — `/mcp` access with a GitHub/OAuth token is denied (403) if the user
+   is not in the allowlist.
+
+> When the allowlist is **empty**, all GitHub users are allowed (open mode).
+> For production you SHOULD populate it.
+
+### 1. Static config (env var / CLI)
+
+```bash
+# Comma-separated usernames or numeric UIDs (auto-detected)
+ALLOWED_GITHUB_USERS=octocat,583231,some-other-user
+```
+
+### 2. Dynamic management (Admin API)
+
+```bash
+# List
+curl http://localhost:3000/admin/github/allowlist \
+  -H "Authorization: Bearer your-admin-token"
+
+# Add (username)
+curl -X POST http://localhost:3000/admin/github/allowlist \
+  -H "Authorization: Bearer your-admin-token" \
+  -H "Content-Type: application/json" \
+  -d '{"value": "octocat", "kind": "username", "note": "core team"}'
+
+# Add (UID)
+curl -X POST http://localhost:3000/admin/github/allowlist \
+  -H "Authorization: Bearer your-admin-token" \
+  -H "Content-Type: application/json" \
+  -d '{"value": "583231", "kind": "uid"}'
+
+# Remove
+curl -X DELETE http://localhost:3000/admin/github/allowlist/octocat \
+  -H "Authorization: Bearer your-admin-token"
 ```
 
 ## API Key Management

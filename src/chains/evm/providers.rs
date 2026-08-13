@@ -70,6 +70,7 @@ fn alchemy_template() -> ProviderTemplate {
     chain_mapping.insert("gnosis".into(), "gnosis-mainnet".into());
     chain_mapping.insert("bnb".into(), "bsc-mainnet".into());
     chain_mapping.insert("scroll".into(), "scroll-mainnet".into());
+    chain_mapping.insert("zksync".into(), "zksync-mainnet".into());
     chain_mapping.insert("sonic".into(), "sonic-mainnet".into());
 
     ProviderTemplate {
@@ -130,7 +131,10 @@ pub fn public_template() -> ProviderTemplate {
     chain_mapping.insert("polygon".into(), "https://polygon.llamarpc.com".into());
     chain_mapping.insert("arbitrum".into(), "https://arb1.arbitrum.io/rpc".into());
     chain_mapping.insert("optimism".into(), "https://mainnet.optimism.io".into());
-    chain_mapping.insert("avalanche".into(), "https://api.avax.network/ext/bc/C/rpc".into());
+    chain_mapping.insert(
+        "avalanche".into(),
+        "https://api.avax.network/ext/bc/C/rpc".into(),
+    );
     chain_mapping.insert("base".into(), "https://mainnet.base.org".into());
     chain_mapping.insert("gnosis".into(), "https://rpc.gnosis.gateway.fm".into());
     chain_mapping.insert("bnb".into(), "https://bsc-dataseed.binance.org".into());

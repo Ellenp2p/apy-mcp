@@ -1,11 +1,11 @@
+use futures::future::join_all;
 use rmcp::{handler::server::wrapper::Parameters, schemars, tool, tool_router};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use futures::future::join_all;
 
-use crate::chains::evm::AaveProvider;
 use crate::chains::evm::rpc::RpcManager;
+use crate::chains::evm::AaveProvider;
 use crate::chains::stellar::BlendProvider;
 use crate::chains::LendingProvider;
 use crate::db::Database;
@@ -176,37 +176,62 @@ impl ApyMcpTools {
 
     /// Apply filters to a list of asset rates
     fn apply_filters(assets: Vec<AssetRate>, params: &QueryRatesParams) -> Vec<AssetRate> {
-        assets.into_iter().filter(|a| {
-            // Asset filter
-            if let Some(ref filter) = params.asset {
-                if !a.asset_name.to_uppercase().contains(&filter.to_uppercase()) {
-                    return false;
+        assets
+            .into_iter()
+            .filter(|a| {
+                // Asset filter
+                if let Some(ref filter) = params.asset {
+                    if !a.asset_name.to_uppercase().contains(&filter.to_uppercase()) {
+                        return false;
+                    }
                 }
-            }
 
-            // Rate filters
-            if let Some(min) = params.min_supply_apy { if a.supply_apy < min { return false; } }
-            if let Some(max) = params.max_supply_apy { if a.supply_apy > max { return false; } }
-            if let Some(min) = params.min_borrow_apy { if a.borrow_apy < min { return false; } }
-            if let Some(max) = params.max_borrow_apy { if a.borrow_apy > max { return false; } }
-            if let Some(min) = params.min_utilization { if a.utilization < min { return false; } }
-            if let Some(max) = params.max_utilization { if a.utilization > max { return false; } }
+                // Rate filters
+                if let Some(min) = params.min_supply_apy {
+                    if a.supply_apy < min {
+                        return false;
+                    }
+                }
+                if let Some(max) = params.max_supply_apy {
+                    if a.supply_apy > max {
+                        return false;
+                    }
+                }
+                if let Some(min) = params.min_borrow_apy {
+                    if a.borrow_apy < min {
+                        return false;
+                    }
+                }
+                if let Some(max) = params.max_borrow_apy {
+                    if a.borrow_apy > max {
+                        return false;
+                    }
+                }
+                if let Some(min) = params.min_utilization {
+                    if a.utilization < min {
+                        return false;
+                    }
+                }
+                if let Some(max) = params.max_utilization {
+                    if a.utilization > max {
+                        return false;
+                    }
+                }
 
-            true
-        }).collect()
+                true
+            })
+            .collect()
     }
 }
 
 #[tool_router(server_handler)]
 impl ApyMcpTools {
-    #[tool(
-        description = "DeFi lending rate query tool. Actions:\n\
+    #[tool(description = "DeFi lending rate query tool. Actions:\n\
         - \"query\" (default): Query rates with filters (chain, asset, protocol, APY range, utilization)\n\
         - \"add\": Add a pool to monitoring (requires chain + pool_id)\n\
         - \"list\": List all monitored pools\n\
         Supports Aave V3 (EVM) and Blend (Stellar). All parameters are optional for query.\n\
-        Data is cached for 60 seconds by default. Set use_cache=false to force fresh data."
-    )]
+        Data is cached for 60 seconds by default. Set use_cache=false to force fresh data.")]
     async fn query_rates(
         &self,
         Parameters(params): Parameters<QueryRatesParams>,
@@ -251,20 +276,33 @@ impl ApyMcpTools {
             "stellar" => {
                 let mut pools = self.state.monitored_pools.write().await;
                 if pools.contains(pool_id) {
-                    format!(r#"{{"success": true, "message": "Pool {} is already being monitored"}}"#, pool_id)
+                    format!(
+                        r#"{{"success": true, "message": "Pool {} is already being monitored"}}"#,
+                        pool_id
+                    )
                 } else {
                     pools.push(pool_id.clone());
-                    format!(r#"{{"success": true, "message": "Added pool {} to monitoring list"}}"#, pool_id)
+                    format!(
+                        r#"{{"success": true, "message": "Added pool {} to monitoring list"}}"#,
+                        pool_id
+                    )
                 }
             }
-            "ethereum" | "polygon" | "arbitrum" | "optimism" | "avalanche" | "base" | "gnosis" | "bnb" | "scroll" | "zksync" | "sonic" => {
+            "ethereum" | "polygon" | "arbitrum" | "optimism" | "avalanche" | "base" | "gnosis"
+            | "bnb" | "scroll" | "zksync" | "sonic" => {
                 let mut pools = self.state.monitored_pools.write().await;
                 let chain_key = format!("aave:{}", chain);
                 if pools.contains(&chain_key) {
-                    format!(r#"{{"success": true, "message": "Aave on {} is already being monitored"}}"#, chain)
+                    format!(
+                        r#"{{"success": true, "message": "Aave on {} is already being monitored"}}"#,
+                        chain
+                    )
                 } else {
                     pools.push(chain_key);
-                    format!(r#"{{"success": true, "message": "Added Aave on {} to monitoring list"}}"#, chain)
+                    format!(
+                        r#"{{"success": true, "message": "Added Aave on {} to monitoring list"}}"#,
+                        chain
+                    )
                 }
             }
             _ => format!(

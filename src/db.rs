@@ -37,6 +37,17 @@ pub struct CachedRates {
     pub cached_at: String,
 }
 
+/// GitHub allowlist entry (a GitHub username or numeric UID)
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct GithubAllowlistEntry {
+    /// GitHub username or numeric UID
+    pub value: String,
+    /// "username" or "uid"
+    pub kind: String,
+    pub note: Option<String>,
+    pub created_at: String,
+}
+
 /// Database manager for API keys and rate cache
 #[derive(Clone)]
 pub struct Database {
@@ -212,7 +223,11 @@ impl Database {
     // ── Rate Cache ─────────────────────────────────────────────────────
 
     /// Get cached rates for a chain if not expired
-    pub async fn get_cached_rates(&self, chain: &str, ttl_secs: i64) -> Result<Option<String>, sqlx::Error> {
+    pub async fn get_cached_rates(
+        &self,
+        chain: &str,
+        ttl_secs: i64,
+    ) -> Result<Option<String>, sqlx::Error> {
         let row = sqlx::query_as::<_, CachedRates>(
             "SELECT chain, data_json, cached_at FROM rate_cache WHERE chain = ?",
         )
@@ -260,5 +275,55 @@ impl Database {
             .execute(&self.pool)
             .await?;
         Ok(result.rows_affected())
+    }
+
+    // ── GitHub Allowlist ─────────────────────────────────────────────
+
+    /// List all GitHub allowlist entries
+    pub async fn list_allowlist(&self) -> Result<Vec<GithubAllowlistEntry>, sqlx::Error> {
+        sqlx::query_as::<_, GithubAllowlistEntry>(
+            "SELECT value, kind, note, created_at FROM github_allowlist ORDER BY created_at",
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Add an entry to the GitHub allowlist (ignored if already present)
+    pub async fn add_allowlist(
+        &self,
+        value: &str,
+        kind: &str,
+        note: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT OR IGNORE INTO github_allowlist (value, kind, note, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(value)
+        .bind(kind)
+        .bind(note)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove an entry from the GitHub allowlist
+    pub async fn remove_allowlist(&self, value: &str) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query("DELETE FROM github_allowlist WHERE value = ?")
+            .bind(value)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Check whether a GitHub user (login or UID) is in the allowlist.
+    /// An empty allowlist means open access (all GitHub users allowed).
+    pub async fn is_github_allowed(&self, login: &str, uid: &str) -> Result<bool, sqlx::Error> {
+        let entries = self.list_allowlist().await?;
+        if entries.is_empty() {
+            return Ok(true);
+        }
+        Ok(entries.iter().any(|e| e.value == login || e.value == uid))
     }
 }

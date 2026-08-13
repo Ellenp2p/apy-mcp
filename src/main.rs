@@ -51,8 +51,8 @@ enum Commands {
         #[arg(long)]
         admin_token: Option<String>,
 
-        /// Base URL for OAuth redirects (e.g., "http://localhost:3000" or "https://mcp.example.com")
-        #[arg(long)]
+        /// Base URL for OAuth redirects (e.g., "https://mcp.example.com", or set BASE_URL env var)
+        #[arg(long, env = "BASE_URL")]
         base_url: Option<String>,
 
         /// Default Blend pool ID
@@ -67,13 +67,10 @@ enum Commands {
         #[arg(long)]
         github_client_secret: Option<String>,
 
-        /// Google OAuth Client ID (optional, or set GOOGLE_CLIENT_ID env var)
-        #[arg(long)]
-        google_client_id: Option<String>,
-
-        /// Google OAuth Client Secret (optional, or set GOOGLE_CLIENT_SECRET env var)
-        #[arg(long)]
-        google_client_secret: Option<String>,
+        /// Comma-separated list of allowed GitHub usernames or numeric UIDs.
+        /// When empty (default) all GitHub users can log in. (or set ALLOWED_GITHUB_USERS env var)
+        #[arg(long, env = "ALLOWED_GITHUB_USERS")]
+        allowed_github_users: Option<String>,
 
         /// Custom OAuth Provider Name (optional, or set CUSTOM_OAUTH_PROVIDER env var)
         #[arg(long)]
@@ -147,12 +144,13 @@ enum Commands {
         #[arg(long)]
         evm_rpc_sonic: Option<String>,
 
-        /// Global EVM RPC provider name (alchemy, infura, drpc, public)
+        /// Global EVM RPC provider name (alchemy [default], infura, drpc, public)
         /// Applies to all chains unless overridden by --evm-rpc-* or --evm-config
         #[arg(long, env = "EVM_PROVIDER")]
         evm_provider: Option<String>,
 
-        /// API key for the global EVM provider
+        /// API key for the global EVM provider.
+        /// Default provider is alchemy, so ALCHEMY_KEY is used when this is unset.
         #[arg(long, env = "EVM_PROVIDER_KEY")]
         evm_provider_key: Option<String>,
 
@@ -215,118 +213,6 @@ enum AdminCommands {
     },
 }
 
-/// Build OAuth config from CLI args and environment variables
-fn build_oauth_config(
-    addr: &std::net::SocketAddr,
-    github_client_id: Option<String>,
-    github_client_secret: Option<String>,
-    google_client_id: Option<String>,
-    google_client_secret: Option<String>,
-    custom_oauth_provider: Option<String>,
-    custom_oauth_client_id: Option<String>,
-    custom_oauth_client_secret: Option<String>,
-    custom_oauth_auth_url: Option<String>,
-    custom_oauth_token_url: Option<String>,
-    custom_oauth_user_info_url: Option<String>,
-    custom_oauth_scopes: Option<String>,
-) -> Option<oauth::OAuthConfig> {
-    let mut providers = HashMap::new();
-    let base_url = format!("http://localhost:{}", addr.port());
-
-    // GitHub OAuth
-    let github_id = github_client_id.or_else(|| std::env::var("GITHUB_CLIENT_ID").ok());
-    let github_secret = github_client_secret.or_else(|| std::env::var("GITHUB_CLIENT_SECRET").ok());
-
-    if let (Some(id), Some(secret)) = (github_id, github_secret) {
-        tracing::info!(client_id = %id, "GitHub OAuth configured");
-        providers.insert(
-            "github".to_string(),
-            oauth::OAuthProviderConfig {
-                name: "github".to_string(),
-                client_id: id,
-                client_secret: secret,
-                auth_url: "https://github.com/login/oauth/authorize".to_string(),
-                token_url: "https://github.com/login/oauth/access_token".to_string(),
-                user_info_url: "https://api.github.com/user".to_string(),
-                scopes: vec!["read:user".to_string(), "user:email".to_string()],
-            },
-        );
-    }
-
-    // Google OAuth
-    let google_id = google_client_id.or_else(|| std::env::var("GOOGLE_CLIENT_ID").ok());
-    let google_secret = google_client_secret.or_else(|| std::env::var("GOOGLE_CLIENT_SECRET").ok());
-
-    if let (Some(id), Some(secret)) = (google_id, google_secret) {
-        tracing::info!(client_id = %id, "Google OAuth configured");
-        providers.insert(
-            "google".to_string(),
-            oauth::OAuthProviderConfig {
-                name: "google".to_string(),
-                client_id: id,
-                client_secret: secret,
-                auth_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
-                token_url: "https://oauth2.googleapis.com/token".to_string(),
-                user_info_url: "https://www.googleapis.com/oauth2/v3/userinfo".to_string(),
-                scopes: vec![
-                    "openid".to_string(),
-                    "email".to_string(),
-                    "profile".to_string(),
-                ],
-            },
-        );
-    }
-
-    // Custom OAuth Provider
-    let custom_id = custom_oauth_client_id.or_else(|| std::env::var("CUSTOM_OAUTH_CLIENT_ID").ok());
-    let custom_secret =
-        custom_oauth_client_secret.or_else(|| std::env::var("CUSTOM_OAUTH_CLIENT_SECRET").ok());
-    let custom_name = custom_oauth_provider.or_else(|| std::env::var("CUSTOM_OAUTH_PROVIDER").ok());
-    let custom_auth = custom_oauth_auth_url.or_else(|| std::env::var("CUSTOM_OAUTH_AUTH_URL").ok());
-    let custom_token =
-        custom_oauth_token_url.or_else(|| std::env::var("CUSTOM_OAUTH_TOKEN_URL").ok());
-    let custom_user =
-        custom_oauth_user_info_url.or_else(|| std::env::var("CUSTOM_OAUTH_USER_INFO_URL").ok());
-    let custom_scopes = custom_oauth_scopes.or_else(|| std::env::var("CUSTOM_OAUTH_SCOPES").ok());
-
-    if let (Some(name), Some(id), Some(secret), Some(auth), Some(token), Some(user)) = (
-        custom_name,
-        custom_id,
-        custom_secret,
-        custom_auth,
-        custom_token,
-        custom_user,
-    ) {
-        let scopes = custom_scopes
-            .map(|s| s.split(',').map(|s| s.trim().to_string()).collect())
-            .unwrap_or_default();
-
-        tracing::info!(provider = %name, client_id = %id, "Custom OAuth configured");
-        providers.insert(
-            name.clone(),
-            oauth::OAuthProviderConfig {
-                name,
-                client_id: id,
-                client_secret: secret,
-                auth_url: auth,
-                token_url: token,
-                user_info_url: user,
-                scopes,
-            },
-        );
-    }
-
-    if providers.is_empty() {
-        tracing::info!("No OAuth providers configured (set GITHUB_CLIENT_ID, GOOGLE_CLIENT_ID, or CUSTOM_OAUTH_* to enable)");
-        None
-    } else {
-        Some(oauth::OAuthConfig {
-            providers,
-            base_url,
-        })
-    }
-}
-
 /// EVM provider configuration loaded from JSON
 #[derive(serde::Deserialize)]
 struct EvmConfig {
@@ -339,6 +225,25 @@ fn load_evm_config(path: &str) -> Result<EvmConfig> {
     let content = std::fs::read_to_string(path)?;
     let config: EvmConfig = serde_json::from_str(&content)?;
     Ok(config)
+}
+
+/// Seed the GitHub allowlist from a comma-separated list of usernames or numeric UIDs.
+/// Numeric values are treated as UIDs, everything else as usernames.
+async fn seed_github_allowlist(db: &db::Database, config: Option<&str>) -> Result<(), sqlx::Error> {
+    let Some(list) = config else {
+        return Ok(());
+    };
+
+    for value in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let kind = if value.parse::<u64>().is_ok() {
+            "uid"
+        } else {
+            "username"
+        };
+        db.add_allowlist(value, kind, Some("ALLOWED_GITHUB_USERS"))
+            .await?;
+    }
+    Ok(())
 }
 
 #[tokio::main]
@@ -370,8 +275,7 @@ async fn main() -> Result<()> {
             pool_id,
             github_client_id,
             github_client_secret,
-            google_client_id,
-            google_client_secret,
+            allowed_github_users,
             custom_oauth_provider: _,
             custom_oauth_client_id: _,
             custom_oauth_client_secret: _,
@@ -420,33 +324,45 @@ async fn main() -> Result<()> {
             // Initialize default OAuth providers (CLI args > env vars)
             oauth::init_default_providers(
                 &db.pool,
-                &base_url,
                 github_client_id.as_deref(),
                 github_client_secret.as_deref(),
-                google_client_id.as_deref(),
-                google_client_secret.as_deref(),
             )
             .await?;
+
+            // Seed GitHub allowlist from CLI/env config (can be managed later via admin API)
+            seed_github_allowlist(&db, allowed_github_users.as_deref()).await?;
+            let allowlist_len = db.list_allowlist().await?.len();
+            if allowlist_len == 0 {
+                tracing::warn!(
+                    "GitHub allowlist is empty - ALL GitHub users can log in. Set ALLOWED_GITHUB_USERS to restrict access."
+                );
+            } else {
+                tracing::info!(entries = allowlist_len, "GitHub allowlist loaded");
+            }
 
             // Set up EVM RPC manager with provider support
             let rpc = crate::chains::evm::rpc::RpcManager::new();
 
-            // 1. Set global default provider (if specified)
-            if let Some(ref provider_name) = evm_provider {
-                let key = evm_provider_key
-                    .or_else(|| {
-                        let env_key = format!("{}_KEY", provider_name.to_uppercase());
-                        std::env::var(&env_key).ok()
-                    });
-                rpc.set_default_provider(provider_name, key).await;
-            }
+            // 1. Set global default provider (defaults to alchemy, key from ALCHEMY_KEY / EVM_PROVIDER_KEY).
+            //    Without a key the provider is skipped and public default URLs are kept as fallback.
+            let default_provider = evm_provider.unwrap_or_else(|| "alchemy".to_string());
+            let key = evm_provider_key.or_else(|| {
+                let env_key = format!("{}_KEY", default_provider.to_uppercase());
+                std::env::var(&env_key).ok()
+            });
+            rpc.set_default_provider(&default_provider, key).await;
 
             // 2. Load JSON config file for per-chain provider assignments
             if let Some(ref config_path) = evm_config {
                 match load_evm_config(config_path) {
                     Ok(config) => {
                         for (chain, assignment) in &config.chains {
-                            rpc.set_chain_provider(chain, &assignment.provider, assignment.api_key.clone()).await;
+                            rpc.set_chain_provider(
+                                chain,
+                                &assignment.provider,
+                                assignment.api_key.clone(),
+                            )
+                            .await;
                         }
                         tracing::info!(chains = config.chains.len(), "Loaded EVM config from file");
                     }
@@ -456,7 +372,11 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // 3. Per-chain direct overrides (highest priority, via --evm-rpc-* or env vars)
+            // 3. Apply provider templates to resolve final URLs (defaults + config-file assignments)
+            rpc.apply_providers().await;
+
+            // 4. Per-chain direct overrides (highest priority, via --evm-rpc-* or env vars).
+            //    Applied after providers so an explicit per-chain URL always wins.
             macro_rules! set_rpc_url {
                 ($chain:expr, $cli_val:expr, $env_var:expr) => {
                     if let Some(url) = $cli_val {
@@ -478,9 +398,6 @@ async fn main() -> Result<()> {
             set_rpc_url!("scroll", evm_rpc_scroll, "EVM_RPC_SCROLL");
             set_rpc_url!("zksync", evm_rpc_zksync, "EVM_RPC_ZKSYNC");
             set_rpc_url!("sonic", evm_rpc_sonic, "EVM_RPC_SONIC");
-
-            // 4. Apply provider templates to resolve final URLs
-            rpc.apply_providers().await;
 
             let tools = ApyMcpTools::with_rpc_manager_and_db(&pool_id, rpc, db.clone());
             let addr: std::net::SocketAddr = addr.parse()?;

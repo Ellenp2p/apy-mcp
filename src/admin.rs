@@ -1,8 +1,6 @@
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::{delete, get, post},
-    Router,
 };
 use serde::{Deserialize, Serialize};
 
@@ -179,7 +177,7 @@ pub async fn delete_key(
 /// Request to create an OAuth provider
 #[derive(Debug, Deserialize)]
 pub struct CreateOAuthProviderRequest {
-    /// Provider name (e.g., "github", "google", "keycloak")
+    /// Provider name (only "github" is supported for login)
     pub name: String,
     /// OAuth issuer URL (for dynamic registration) OR auth URL (for manual)
     pub issuer: Option<String>,
@@ -340,7 +338,11 @@ pub async fn list_rpc_providers(
         .collect();
 
     // Also include current config
-    let default_provider = _state.tools.state.aave_provider.get_rpc_manager()
+    let default_provider = _state
+        .tools
+        .state
+        .aave_provider
+        .get_rpc_manager()
         .get_default_provider()
         .await;
 
@@ -366,14 +368,95 @@ pub async fn get_rpc_status(
     })))
 }
 
-/// Build the admin routes (no state type parameter - merged with main router)
-pub fn admin_routes() -> Router<crate::http::HttpState> {
-    Router::new()
-        .route("/keys", post(create_key).get(list_keys))
-        .route("/keys/{key_id}", delete(delete_key))
-        .route("/keys/{key_id}/deactivate", delete(deactivate_key))
-        .route("/keys/{key_id}/reactivate", post(reactivate_key))
-        .route("/stats", get(get_stats))
-        .route("/rpc/providers", get(list_rpc_providers))
-        .route("/rpc/status", get(get_rpc_status))
+// ── GitHub Allowlist Management ──────────────────────────────────────
+
+/// Request to add an entry to the GitHub allowlist
+#[derive(Debug, Deserialize)]
+pub struct AddAllowlistRequest {
+    /// GitHub username or numeric UID
+    pub value: String,
+    /// Optional kind: "username" or "uid" (auto-detected when omitted)
+    pub kind: Option<String>,
+    /// Optional note
+    pub note: Option<String>,
+}
+
+/// Detect whether a value is a GitHub UID (all digits) or a username
+fn detect_allowlist_kind(value: &str) -> String {
+    if value.parse::<u64>().is_ok() {
+        "uid".to_string()
+    } else {
+        "username".to_string()
+    }
+}
+
+/// List all GitHub allowlist entries
+pub async fn list_github_allowlist(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    let entries = state
+        .db
+        .list_allowlist()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(axum::Json(serde_json::json!({
+        "entries": entries
+    })))
+}
+
+/// Add an entry to the GitHub allowlist
+pub async fn add_github_allowlist(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+    axum::extract::Json(req): axum::extract::Json<AddAllowlistRequest>,
+) -> Result<(StatusCode, axum::Json<serde_json::Value>), StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    let value = req.value.trim();
+    if value.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let kind = req
+        .kind
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| detect_allowlist_kind(value));
+
+    state
+        .db
+        .add_allowlist(value, &kind, req.note.as_deref())
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    tracing::info!(value = %value, kind = %kind, "GitHub allowlist entry added");
+    Ok((
+        StatusCode::CREATED,
+        axum::Json(serde_json::json!({ "value": value, "kind": kind })),
+    ))
+}
+
+/// Remove an entry from the GitHub allowlist
+pub async fn remove_github_allowlist(
+    State(state): State<crate::http::HttpState>,
+    headers: HeaderMap,
+    Path(value): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    validate_admin_token(&headers, &state.admin_token)?;
+
+    if !state
+        .db
+        .remove_allowlist(&value)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    tracing::info!(value = %value, "GitHub allowlist entry removed");
+    Ok(StatusCode::OK)
 }

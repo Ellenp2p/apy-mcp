@@ -43,67 +43,89 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 1,
             name: "ethereum".to_string(),
             rpc_url: "https://eth.llamarpc.com".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("0a16f2FCC0D44FaE41cc54e079281D84A363bECD").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("0a16f2FCC0D44FaE41cc54e079281D84A363bECD").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 137,
             name: "polygon".to_string(),
             rpc_url: "https://polygon.llamarpc.com".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("243Aa95cAC2a25651eda86e80bEe66114413c43b").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("243Aa95cAC2a25651eda86e80bEe66114413c43b").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 42161,
             name: "arbitrum".to_string(),
             rpc_url: "https://arb1.arbitrum.io/rpc".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 10,
             name: "optimism".to_string(),
             rpc_url: "https://mainnet.optimism.io".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 43114,
             name: "avalanche".to_string(),
             rpc_url: "https://api.avax.network/ext/bc/C/rpc".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 8453,
             name: "base".to_string(),
             rpc_url: "https://mainnet.base.org".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("d82a47fdebce5b02a5a39c85d4af4f60b89f4544").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("d82a47fdebce5b02a5a39c85d4af4f60b89f4544").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 100,
             name: "gnosis".to_string(),
             rpc_url: "https://rpc.gnosis.gateway.fm".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("501B4c19dd9C2e06E94dA7b6D5Ed4ddA013EC741").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("501B4c19dd9C2e06E94dA7b6D5Ed4ddA013EC741").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 56,
             name: "bnb".to_string(),
             rpc_url: "https://bsc-dataseed.binance.org".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("43d6d4d6493d1d9A70e00B5bba9F76E4D33aE57E").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("43d6d4d6493d1d9A70e00B5bba9F76E4D33aE57E").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 534352,
             name: "scroll".to_string(),
             rpc_url: "https://rpc.scroll.io".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("DC3c19C892B90dB8B486F1Ba63e48Ee8b85F6aE8").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("DC3c19C892B90dB8B486F1Ba63e48Ee8b85F6aE8").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 324,
             name: "zksync".to_string(),
             rpc_url: "https://mainnet.era.zksync.io".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("E39Da74E2fDe81aA6829CC37B8cD51E1B209b0f2").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("E39Da74E2fDe81aA6829CC37B8cD51E1B209b0f2").unwrap(),
+            ),
         },
         ChainConfig {
             chain_id: 146,
             name: "sonic".to_string(),
             rpc_url: "https://rpc.soniclabs.com".to_string(),
-            aave_data_provider: H160::from_slice(&hex::decode("c0a344397cfa89dF1e1d3e4fb330834D789cF2CD").unwrap()),
+            aave_data_provider: H160::from_slice(
+                &hex::decode("c0a344397cfa89dF1e1d3e4fb330834D789cF2CD").unwrap(),
+            ),
         },
     ]
 }
@@ -160,7 +182,11 @@ impl RpcManager {
         let mut configs = self.configs.write().await;
         if let Some(config) = configs.get_mut(chain_name) {
             config.rpc_url = rpc_url.to_string();
-            tracing::info!(chain = chain_name, url = rpc_url, "Updated RPC URL (direct override)");
+            tracing::info!(
+                chain = chain_name,
+                url = rpc_url,
+                "Updated RPC URL (direct override)"
+            );
         }
     }
 
@@ -172,7 +198,12 @@ impl RpcManager {
     }
 
     /// Set provider for a specific chain (overrides global default)
-    pub async fn set_chain_provider(&self, chain_name: &str, provider_name: &str, api_key: Option<String>) {
+    pub async fn set_chain_provider(
+        &self,
+        chain_name: &str,
+        provider_name: &str,
+        api_key: Option<String>,
+    ) {
         let mut cp = self.chain_providers.write().await;
         cp.insert(
             chain_name.to_string(),
@@ -181,7 +212,11 @@ impl RpcManager {
                 api_key,
             },
         );
-        tracing::info!(chain = chain_name, provider = provider_name, "Set chain provider");
+        tracing::info!(
+            chain = chain_name,
+            provider = provider_name,
+            "Set chain provider"
+        );
     }
 
     /// Apply provider templates to resolve final RPC URLs.
@@ -194,17 +229,16 @@ impl RpcManager {
         for (chain_name, config) in configs.iter_mut() {
             // 1. Check per-chain override
             let resolved = chain_overrides.get(chain_name).cloned().or_else(|| {
-                default.as_ref().map(|(name, key)| {
-                    ChainProviderAssignment {
-                        provider: name.clone(),
-                        api_key: key.clone(),
-                    }
+                default.as_ref().map(|(name, key)| ChainProviderAssignment {
+                    provider: name.clone(),
+                    api_key: key.clone(),
                 })
             });
 
             if let Some(ref assignment) = resolved {
                 if let Some(template) = providers::get_provider(&assignment.provider) {
-                    if let Some(url) = template.build_url(chain_name, assignment.api_key.as_deref()) {
+                    if let Some(url) = template.build_url(chain_name, assignment.api_key.as_deref())
+                    {
                         config.rpc_url = url;
                     }
                 }
@@ -295,7 +329,8 @@ impl RpcManager {
                         }
                     } else if let Some(result) = json.result {
                         let block_str = result.as_str().unwrap_or("0x0");
-                        let block = u64::from_str_radix(block_str.trim_start_matches("0x"), 16).unwrap_or(0);
+                        let block = u64::from_str_radix(block_str.trim_start_matches("0x"), 16)
+                            .unwrap_or(0);
                         ChainHealthStatus {
                             chain: chain_name.to_string(),
                             rpc_url: config.rpc_url,
@@ -349,9 +384,9 @@ impl RpcManager {
         let mut handles = Vec::new();
         for name in chain_names {
             let rpc = self.clone();
-            handles.push(tokio::spawn(async move {
-                rpc.check_chain_health(&name).await
-            }));
+            handles.push(tokio::spawn(
+                async move { rpc.check_chain_health(&name).await },
+            ));
         }
 
         let mut results = Vec::new();

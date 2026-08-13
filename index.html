@@ -186,7 +186,8 @@
             color: var(--muted);
         }
 
-        .form-group input {
+        .form-group input,
+        .form-group select {
             width: 100%;
             padding: 10px 15px;
             border: 1px solid var(--border);
@@ -196,7 +197,8 @@
             font-size: 14px;
         }
 
-        .form-group input:focus {
+        .form-group input:focus,
+        .form-group select:focus {
             outline: none;
             border-color: var(--accent);
         }
@@ -402,6 +404,7 @@
         <div class="tabs">
             <div class="tab active" data-tab="keys">API Keys</div>
             <div class="tab" data-tab="oauth">OAuth Providers</div>
+            <div class="tab" data-tab="allowlist">GitHub 白名单</div>
             <div class="tab" data-tab="stats">使用统计</div>
             <div class="tab" data-tab="guide">使用指南</div>
         </div>
@@ -428,6 +431,53 @@
                 </div>
                 <div id="oauthList">
                     <div class="empty-state">请先连接到服务器</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- GitHub Allowlist Tab -->
+        <div class="tab-content hidden" id="tab-allowlist">
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-title">GitHub 登录白名单</div>
+                    <button class="btn btn-primary" onclick="showAddAllowlistModal()">+ 添加用户</button>
+                </div>
+                <div style="background: var(--bg); padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; color: var(--muted); line-height: 1.6;">
+                    只有白名单内的 GitHub 用户名或 UID 才能登录并使用服务。白名单为空时表示开放（所有 GitHub 用户均可登录）。
+                    可填写 GitHub <strong>用户名</strong>（如 <code>octocat</code>）或数字 <strong>UID</strong>（如 <code>583231</code>）。
+                </div>
+                <div id="allowlistList">
+                    <div class="empty-state">请先连接到服务器</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Add Allowlist Modal -->
+        <div class="modal" id="addAllowlistModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <div class="card-title">添加 GitHub 用户</div>
+                    <button class="modal-close" onclick="closeAddAllowlistModal()">&times;</button>
+                </div>
+                <div class="form-group">
+                    <label>GitHub 用户名 或 UID *</label>
+                    <input type="text" id="allowlistValue" placeholder="如: octocat 或 583231">
+                </div>
+                <div class="form-group">
+                    <label>类型（自动检测，可留空）</label>
+                    <select id="allowlistKind">
+                        <option value="">自动检测</option>
+                        <option value="username">用户名</option>
+                        <option value="uid">UID</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>备注 (可选)</label>
+                    <input type="text" id="allowlistNote" placeholder="如: 核心团队成员">
+                </div>
+                <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px;">
+                    <button class="btn" style="background: var(--border);" onclick="closeAddAllowlistModal()">取消</button>
+                    <button class="btn btn-primary" onclick="addAllowlist()">添加</button>
                 </div>
             </div>
         </div>
@@ -477,6 +527,9 @@
   -H "Authorization: Bearer amcp_your_api_key" \
   -H "X-Poke-User-Id: your-user-id" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}'</pre>
+
+                    <p style="margin-top: 16px;"><strong>5. GitHub 登录与访问控制</strong></p>
+                    <p>登录仅支持 GitHub。在 <strong>GitHub 白名单</strong> 页维护允许登录的用户（按用户名或 UID），白名单为空时所有 GitHub 用户可登录。</p>
 
                     <p style="margin-top: 16px;"><strong>自定义 Headers</strong></p>
                     <p>以 <code>X-Poke-</code> 或 <code>X-Custom-</code> 开头的 Header 会自动记录到日志中。</p>
@@ -547,9 +600,6 @@
                     <button class="btn" style="background: #24292e; color: white; flex: 1;" onclick="presetGitHub()">
                         🐙 GitHub
                     </button>
-                    <button class="btn" style="background: #4285f4; color: white; flex: 1;" onclick="presetGoogle()">
-                        🔍 Google
-                    </button>
                 </div>
             </div>
 
@@ -557,7 +607,7 @@
 
             <div class="form-group">
                 <label>Provider 名称 *</label>
-                <input type="text" id="oauthName" placeholder="如: github, google, keycloak">
+                <input type="text" id="oauthName" placeholder="如: github">
             </div>
             <div class="form-group">
                 <label>Issuer URL (动态注册，RFC 7591)</label>
@@ -603,6 +653,7 @@
         let adminToken = '';
         let keys = [];
         let oauthProviders = [];
+        let allowlistEntries = [];
 
         // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
@@ -643,6 +694,7 @@
                     document.getElementById('statusText').textContent = '已连接';
                     await loadKeys();
                     await loadOAuthProviders();
+                    await loadAllowlist();
                     showToast('连接成功', 'success');
                 } else {
                     throw new Error('Health check failed');
@@ -850,17 +902,6 @@
             showToast('已填入 GitHub 配置，请输入 Client ID 和 Secret', 'info');
         }
 
-        function presetGoogle() {
-            document.getElementById('oauthName').value = 'google';
-            document.getElementById('oauthIssuer').value = '';
-            document.getElementById('oauthAuthUrl').value = 'https://accounts.google.com/o/oauth2/v2/auth';
-            document.getElementById('oauthTokenUrl').value = 'https://oauth2.googleapis.com/token';
-            document.getElementById('oauthUserInfoUrl').value = 'https://www.googleapis.com/oauth2/v2/userinfo';
-            document.getElementById('oauthScopes').value = 'openid,email,profile';
-            document.getElementById('oauthClientId').focus();
-            showToast('已填入 Google 配置，请输入 Client ID 和 Secret', 'info');
-        }
-
         async function createOAuthProvider() {
             const name = document.getElementById('oauthName').value.trim();
             const issuer = document.getElementById('oauthIssuer').value.trim();
@@ -976,6 +1017,140 @@
                 }
             } catch (error) {
                 showToast('操作失败: ' + error.message, 'error');
+            }
+        }
+
+        // ── GitHub Allowlist ──────────────────────────────────────────────
+
+        async function loadAllowlist() {
+            try {
+                const response = await fetch(serverUrl + '/admin/github/allowlist', {
+                    headers: {
+                        'Authorization': 'Bearer ' + adminToken
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    allowlistEntries = data.entries || [];
+                    renderAllowlist();
+                }
+            } catch (error) {
+                console.error('Failed to load allowlist:', error);
+            }
+        }
+
+        function renderAllowlist() {
+            const container = document.getElementById('allowlistList');
+
+            if (allowlistEntries.length === 0) {
+                container.innerHTML = '<div class="empty-state">白名单为空 — 所有 GitHub 用户均可登录。<br><br>点击"添加用户"开始限制访问</div>';
+                return;
+            }
+
+            container.innerHTML = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>值</th>
+                            <th>类型</th>
+                            <th>备注</th>
+                            <th>创建时间</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${allowlistEntries.map(entry => `
+                            <tr>
+                                <td><code style="background: var(--bg); padding: 2px 6px; border-radius: 4px; font-size: 12px;">${escapeHtml(entry.value)}</code></td>
+                                <td>
+                                    <span class="badge" style="${entry.kind === 'uid' ? 'background: rgba(108, 92, 231, 0.15); color: var(--accent);' : 'background: rgba(0, 184, 148, 0.15); color: var(--success);'}">
+                                        ${entry.kind === 'uid' ? 'UID' : '用户名'}
+                                    </span>
+                                </td>
+                                <td>${escapeHtml(entry.note || '-')}</td>
+                                <td>${new Date(entry.created_at).toLocaleString()}</td>
+                                <td>
+                                    <button class="btn btn-small btn-danger" onclick="removeAllowlist('${entry.value.replace(/'/g, "\\'")}')">移除</button>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+        }
+
+        function showAddAllowlistModal() {
+            if (!serverUrl) {
+                showToast('请先连接到服务器', 'error');
+                return;
+            }
+            document.getElementById('addAllowlistModal').classList.add('active');
+        }
+
+        function closeAddAllowlistModal() {
+            document.getElementById('addAllowlistModal').classList.remove('active');
+            document.getElementById('allowlistValue').value = '';
+            document.getElementById('allowlistKind').value = '';
+            document.getElementById('allowlistNote').value = '';
+        }
+
+        async function addAllowlist() {
+            const value = document.getElementById('allowlistValue').value.trim();
+            const kind = document.getElementById('allowlistKind').value;
+            const note = document.getElementById('allowlistNote').value.trim();
+
+            if (!value) {
+                showToast('请输入 GitHub 用户名或 UID', 'error');
+                return;
+            }
+
+            try {
+                const body = { value: value };
+                if (kind) body.kind = kind;
+                if (note) body.note = note;
+
+                const response = await fetch(serverUrl + '/admin/github/allowlist', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + adminToken
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                if (response.ok) {
+                    showToast('已添加', 'success');
+                    closeAddAllowlistModal();
+                    await loadAllowlist();
+                } else {
+                    const error = await response.text();
+                    showToast('添加失败: ' + error, 'error');
+                }
+            } catch (error) {
+                showToast('添加失败: ' + error.message, 'error');
+            }
+        }
+
+        async function removeAllowlist(value) {
+            if (!confirm('确定要从白名单中移除 ' + value + ' 吗？')) return;
+
+            try {
+                const response = await fetch(serverUrl + '/admin/github/allowlist/' + encodeURIComponent(value), {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': 'Bearer ' + adminToken
+                    }
+                });
+
+                if (response.ok) {
+                    showToast('已移除', 'success');
+                    await loadAllowlist();
+                } else {
+                    showToast('移除失败', 'error');
+                }
+            } catch (error) {
+                showToast('移除失败: ' + error.message, 'error');
             }
         }
 
