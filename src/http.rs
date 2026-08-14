@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     extract::{Request, State},
-    http::{HeaderMap, Method, StatusCode},
+    http::{header::WWW_AUTHENTICATE, HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -11,6 +11,7 @@ use axum::{
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
+use sqlx::SqlitePool;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{db::Database, mcp::tools::ApyMcpTools};
@@ -87,6 +88,21 @@ async fn check_rate_limit(state: &HttpState, key: &str, limit: usize) -> Result<
     Ok(())
 }
 
+/// Build a 401 response with the RFC 9728 bearer challenge header so MCP
+/// clients (opencode, VS Code, Claude Desktop) know how to start OAuth.
+fn unauthorized_response(base_url: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(
+            WWW_AUTHENTICATE,
+            format!(
+                r#"Bearer resource="{base_url}/mcp", authorization_servers="{base_url}""#
+            ),
+        )],
+    )
+        .into_response()
+}
+
 /// API Key authentication middleware with rate limiting
 async fn auth_middleware(
     State(state): State<HttpState>,
@@ -95,15 +111,16 @@ async fn auth_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     // Extract Authorization header
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let auth_header = match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        Some(header) => header,
+        None => return Ok(unauthorized_response(&state.base_url)),
+    };
 
     // Extract Bearer token
-    let raw_key = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let raw_key = match auth_header.strip_prefix("Bearer ") {
+        Some(key) => key,
+        None => return Ok(unauthorized_response(&state.base_url)),
+    };
 
     // Default rate limit for OAuth-authenticated requests (per user)
     const OAUTH_RATE_LIMIT: usize = 60;
@@ -210,15 +227,14 @@ async fn auth_middleware(
     }
 
     // 3. Not an OAuth token, try API key
-    let api_key = state
-        .db
-        .validate_key(raw_key)
-        .await
-        .map_err(|e| {
+    let api_key = match state.db.validate_key(raw_key).await {
+        Ok(Some(key)) => key,
+        Ok(None) => return Ok(unauthorized_response(&state.base_url)),
+        Err(e) => {
             tracing::error!(error = %e, "Failed to validate API key");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
     // Check rate limit
     check_rate_limit(&state, &api_key.id, api_key.rate_limit as usize).await?;
@@ -306,8 +322,11 @@ async fn oauth_authorize_handler(
     let redirect_uri = params.get("redirect_uri").cloned().unwrap_or_default();
     let state = params.get("state").cloned().unwrap_or_default();
     let code_challenge = params.get("code_challenge").cloned().unwrap_or_default();
+    let code_challenge_method = params
+        .get("code_challenge_method")
+        .cloned()
+        .unwrap_or_default();
     let scope = params.get("scope").cloned().unwrap_or_default();
-
     // Query available OAuth providers from database (only GitHub is supported)
     let providers = crate::oauth::OAuthProvider::list(&http_state.db.pool)
         .await
@@ -320,11 +339,12 @@ async fn oauth_authorize_handler(
     let mut social_buttons = String::new();
     if github_configured {
         social_buttons.push_str(&format!(
-            r#"<a href="/auth/github?client_id={}&redirect_uri={}&state={}&code_challenge={}&scope={}" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: #24292e; color: white; font-size: 16px; cursor: pointer; text-decoration: none; margin-bottom: 8px; box-sizing: border-box;">🐙 GitHub</a>"#,
+            r#"<a href="/auth/github?client_id={}&redirect_uri={}&state={}&code_challenge={}&code_challenge_method={}&scope={}" style="display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 12px; border: none; border-radius: 8px; background: #24292e; color: white; font-size: 16px; cursor: pointer; text-decoration: none; margin-bottom: 8px; box-sizing: border-box;">🐙 GitHub</a>"#,
             urlencoding::encode(&client_id),
             urlencoding::encode(&redirect_uri),
             urlencoding::encode(&state),
             urlencoding::encode(&code_challenge),
+            urlencoding::encode(&code_challenge_method),
             urlencoding::encode(&scope),
         ));
     }
@@ -433,6 +453,146 @@ async fn oauth_register_handler(
     ))
 }
 
+/// Constant-time string comparison
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Hash a client secret for storage
+fn hash_client_secret(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(secret.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// RFC 7636 - PKCE S256 code challenge from a code_verifier
+fn pkce_s256_challenge(verifier: &str) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let digest = hasher.finalize();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+/// Extract OAuth client credentials from form body or Authorization header
+fn extract_client_credentials(
+    headers: &HeaderMap,
+    params: &std::collections::HashMap<String, String>,
+) -> Result<(String, String), StatusCode> {
+    if let (Some(id), Some(secret)) = (params.get("client_id"), params.get("client_secret")) {
+        Ok((id.clone(), secret.clone()))
+    } else if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        if let Some(basic) = auth_header.strip_prefix("Basic ") {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(basic) {
+                Ok(decoded) => {
+                    let decoded_str = String::from_utf8_lossy(&decoded);
+                    let parts: Vec<&str> = decoded_str.splitn(2, ':').collect();
+                    if parts.len() == 2 {
+                        Ok((parts[0].to_string(), parts[1].to_string()))
+                    } else {
+                        Err(StatusCode::BAD_REQUEST)
+                    }
+                }
+                Err(_) => Err(StatusCode::BAD_REQUEST),
+            }
+        } else {
+            Err(StatusCode::BAD_REQUEST)
+        }
+    } else if let Some(id) = params.get("client_id") {
+        Ok((id.clone(), String::new()))
+    } else {
+        Err(StatusCode::BAD_REQUEST)
+    }
+}
+
+/// Load or auto-register an OAuth client and verify its secret
+async fn resolve_client(
+    pool: &SqlitePool,
+    client_id: &str,
+    client_secret: &str,
+) -> Result<(), StatusCode> {
+    let existing = sqlx::query_as::<_, (String, String)>(
+        "SELECT client_id, client_secret FROM oauth_clients WHERE client_id = ?",
+    )
+    .bind(client_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let secret_hash = hash_client_secret(client_secret);
+
+    match existing {
+        Some((_, stored_hash)) => {
+            if !constant_time_eq(&secret_hash, &stored_hash) {
+                tracing::warn!(client_id = client_id, "OAuth client secret mismatch");
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+        None => {
+            // Auto-register for client compatibility (VS Code etc.)
+            let now = chrono::Utc::now().to_rfc3339();
+            sqlx::query(
+                "INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(client_id)
+            .bind(&secret_hash)
+            .bind("MCP Client")
+            .bind("[]")
+            .bind(&now)
+            .execute(pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            tracing::info!(client_id = client_id, "Auto-registered OAuth client");
+        }
+    }
+    Ok(())
+}
+
+/// Issue a new access token + refresh token pair (24h TTL)
+async fn issue_tokens(
+    pool: &SqlitePool,
+    user_id: &str,
+    client_id: &str,
+    scope: Option<&str>,
+) -> Result<(String, String, String), StatusCode> {
+    let access_token = format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let refresh_token = format!("mrp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let now = chrono::Utc::now().to_rfc3339();
+    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+
+    sqlx::query(
+        "INSERT INTO oauth_access_tokens (token, user_id, client_id, scope, expires_at, created_at, refresh_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&access_token)
+    .bind(user_id)
+    .bind(client_id)
+    .bind(scope.unwrap_or(""))
+    .bind(&expires_at)
+    .bind(&now)
+    .bind(&refresh_token)
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to store access token");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tracing::info!(user_id = user_id, "Access token issued");
+    Ok((access_token, refresh_token, expires_at))
+}
+
 /// OAuth Token endpoint
 /// Supports both client_secret_post (form body) and client_secret_basic (Authorization header)
 async fn oauth_token_handler(
@@ -445,77 +605,12 @@ async fn oauth_token_handler(
     match grant_type.as_str() {
         "authorization_code" => {
             let code = params.get("code").ok_or(StatusCode::BAD_REQUEST)?;
-
-            // Support both client_secret_post and client_secret_basic
-            // First try form body, then fall back to Authorization header
-            let (client_id, client_secret) = if let (Some(id), Some(secret)) =
-                (params.get("client_id"), params.get("client_secret"))
-            {
-                // client_secret_post: credentials in form body
-                (id.clone(), secret.clone())
-            } else if let Some(auth_header) =
-                headers.get("authorization").and_then(|v| v.to_str().ok())
-            {
-                // client_secret_basic: credentials in Authorization header (Base64 encoded)
-                if let Some(basic) = auth_header.strip_prefix("Basic ") {
-                    use base64::Engine;
-                    match base64::engine::general_purpose::STANDARD.decode(basic) {
-                        Ok(decoded) => {
-                            let decoded_str = String::from_utf8_lossy(&decoded);
-                            let parts: Vec<&str> = decoded_str.splitn(2, ':').collect();
-                            if parts.len() == 2 {
-                                (parts[0].to_string(), parts[1].to_string())
-                            } else {
-                                return Err(StatusCode::BAD_REQUEST);
-                            }
-                        }
-                        Err(_) => return Err(StatusCode::BAD_REQUEST),
-                    }
-                } else {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-            } else if let Some(id) = params.get("client_id") {
-                // client_id in form body but no secret
-                (id.clone(), String::new())
-            } else {
-                return Err(StatusCode::BAD_REQUEST);
-            };
-
-            // Check if client exists, if not auto-register (for VS Code compatibility)
-            use sha2::{Digest, Sha256};
-            let existing_client = sqlx::query_as::<_, (String, String)>(
-                "SELECT client_id, client_secret FROM oauth_clients WHERE client_id = ?",
-            )
-            .bind(&client_id)
-            .fetch_optional(&state.db.pool)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-            if existing_client.is_none() {
-                // Auto-register client
-                let now = chrono::Utc::now().to_rfc3339();
-                let mut hasher = Sha256::new();
-                hasher.update(client_secret.as_bytes());
-                let secret_hash = hex::encode(hasher.finalize());
-
-                sqlx::query(
-                    "INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?)",
-                )
-                .bind(&client_id)
-                .bind(&secret_hash)
-                .bind("VS Code MCP Client")
-                .bind("[]")
-                .bind(&now)
-                .execute(&state.db.pool)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-                tracing::info!(client_id = %client_id, "Auto-registered OAuth client");
-            }
+            let (client_id, client_secret) = extract_client_credentials(&headers, &params)?;
+            resolve_client(&state.db.pool, &client_id, &client_secret).await?;
 
             // Validate authorization code
-            let auth_code = sqlx::query_as::<_, (String, String, String)>(
-                "SELECT code, client_id, user_id FROM oauth_authorization_codes WHERE code = ? AND client_id = ? AND expires_at > ?",
+            let auth_code = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>)>(
+                "SELECT code, client_id, user_id, code_challenge, code_challenge_method FROM oauth_authorization_codes WHERE code = ? AND client_id = ? AND expires_at > ?",
             )
             .bind(code)
             .bind(&client_id)
@@ -524,51 +619,95 @@ async fn oauth_token_handler(
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            match auth_code {
-                Some((_, _, user_id)) => {
-                    // Delete used code
-                    sqlx::query("DELETE FROM oauth_authorization_codes WHERE code = ?")
-                        .bind(code)
-                        .execute(&state.db.pool)
-                        .await
-                        .ok();
-
-                    // Generate access token
-                    let access_token =
-                        format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-
-                    // Store access token
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
-                    let result = sqlx::query(
-                        "INSERT INTO oauth_access_tokens (token, user_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
-                    )
-                    .bind(&access_token)
-                    .bind(&user_id)
-                    .bind(&client_id)
-                    .bind(&expires_at)
-                    .bind(&now)
-                    .execute(&state.db.pool)
-                    .await;
-
-                    if let Err(e) = &result {
-                        tracing::error!(error = %e, "Failed to store access token");
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            let (_, _, user_id, code_challenge, code_challenge_method) =
+                match auth_code {
+                    Some(row) => row,
+                    None => {
+                        tracing::warn!(code = %code, "Invalid or expired authorization code");
+                        return Err(StatusCode::UNAUTHORIZED);
                     }
+                };
 
-                    tracing::info!(user_id = %user_id, "Access token issued");
+            // Delete used code (single-use)
+            sqlx::query("DELETE FROM oauth_authorization_codes WHERE code = ?")
+                .bind(code)
+                .execute(&state.db.pool)
+                .await
+                .ok();
 
-                    Ok(axum::Json(serde_json::json!({
-                        "access_token": access_token,
-                        "token_type": "Bearer",
-                        "expires_in": 3600
-                    })))
-                }
-                None => {
-                    tracing::warn!(code = %code, "Invalid or expired authorization code");
-                    Err(StatusCode::UNAUTHORIZED)
+            // PKCE verification (RFC 7636)
+            if let Some(challenge) = code_challenge {
+                if !challenge.is_empty() {
+                    let method = code_challenge_method
+                        .as_deref()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or("S256");
+                    let verifier = params
+                        .get("code_verifier")
+                        .ok_or(StatusCode::BAD_REQUEST)?;
+                    if method != "S256" {
+                        // Only S256 is supported
+                        return Err(StatusCode::BAD_REQUEST);
+                    }
+                    if !constant_time_eq(&pkce_s256_challenge(verifier), &challenge) {
+                        tracing::warn!("PKCE code_verifier mismatch");
+                        return Err(StatusCode::UNAUTHORIZED);
+                    }
                 }
             }
+
+            let (access_token, refresh_token, _expires_at) =
+                issue_tokens(&state.db.pool, &user_id, &client_id, None).await?;
+
+            Ok(axum::Json(serde_json::json!({
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": "Bearer",
+                "expires_in": 86400
+            })))
+        }
+        "refresh_token" => {
+            let refresh_token = params.get("refresh_token").ok_or(StatusCode::BAD_REQUEST)?;
+            let (client_id, client_secret) = extract_client_credentials(&headers, &params)?;
+            resolve_client(&state.db.pool, &client_id, &client_secret).await?;
+
+            // Look up the row that owns this refresh token
+            let row = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+                "SELECT token, user_id, client_id, scope FROM oauth_access_tokens WHERE refresh_token = ? AND client_id = ? AND expires_at > ?",
+            )
+            .bind(refresh_token)
+            .bind(&client_id)
+            .bind(chrono::Utc::now().to_rfc3339())
+            .fetch_optional(&state.db.pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            let (old_token, user_id, _, scope) = match row {
+                Some(row) => row,
+                None => {
+                    tracing::warn!("Invalid or expired refresh token");
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+            };
+
+            // Rotate: revoke the old token + refresh token, issue a fresh pair
+            sqlx::query("DELETE FROM oauth_access_tokens WHERE token = ?")
+                .bind(&old_token)
+                .execute(&state.db.pool)
+                .await
+                .ok();
+
+            let (access_token, refresh_token, _expires_at) =
+                issue_tokens(&state.db.pool, &user_id, &client_id, scope.as_deref()).await?;
+
+            tracing::info!(user_id = %user_id, "Access token refreshed");
+
+            Ok(axum::Json(serde_json::json!({
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": "Bearer",
+                "expires_in": 86400
+            })))
         }
         _ => Err(StatusCode::BAD_REQUEST),
     }

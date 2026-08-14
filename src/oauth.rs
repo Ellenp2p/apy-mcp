@@ -130,6 +130,22 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok(); // Ignore error if column already exists
 
+    // Migrations for existing databases (ignore errors if columns already exist)
+    sqlx::query("ALTER TABLE oauth_access_tokens ADD COLUMN refresh_token TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE oauth_authorization_codes ADD COLUMN code_challenge TEXT")
+        .execute(pool)
+        .await
+        .ok();
+    sqlx::query(
+        "ALTER TABLE oauth_authorization_codes ADD COLUMN code_challenge_method TEXT",
+    )
+    .execute(pool)
+    .await
+    .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS oauth_users (
@@ -159,6 +175,8 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             user_id TEXT NOT NULL,
             redirect_uri TEXT,
             scope TEXT,
+            code_challenge TEXT,
+            code_challenge_method TEXT,
             expires_at TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
@@ -169,8 +187,11 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             client_id TEXT NOT NULL,
             scope TEXT,
             expires_at TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            refresh_token TEXT
         );
+
+        CREATE INDEX IF NOT EXISTS idx_oauth_refresh_token ON oauth_access_tokens(refresh_token);
 
         CREATE TABLE IF NOT EXISTS github_allowlist (
             value TEXT PRIMARY KEY,
@@ -450,10 +471,21 @@ async fn oauth_auth(
     Path(provider_name): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Redirect, StatusCode> {
-    // Only GitHub login is supported
+    // Only GitHub login is supported - redirect unknown providers to the authorize page
+    // so the OAuth flow can still complete instead of dying
     if provider_name != "github" {
-        tracing::warn!(provider = %provider_name, "Rejected non-GitHub OAuth provider");
-        return Ok(Redirect::to("/?error=provider_not_supported"));
+        tracing::warn!(provider = %provider_name, "Non-GitHub OAuth provider requested, redirecting to authorize page");
+        let mut target = String::from("/oauth/authorize");
+        if !params.is_empty() {
+            let qs = params
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+                .collect::<Vec<_>>()
+                .join("&");
+            target.push('?');
+            target.push_str(&qs);
+        }
+        return Ok(Redirect::to(&target));
     }
 
     // Look up provider from database
@@ -480,6 +512,7 @@ async fn oauth_auth(
             "redirect_uri": params.get("redirect_uri").cloned().unwrap_or_default(),
             "state": params.get("state").cloned().unwrap_or_default(),
             "code_challenge": params.get("code_challenge").cloned().unwrap_or_default(),
+            "code_challenge_method": params.get("code_challenge_method").cloned().unwrap_or_default(),
             "scope": params.get("scope").cloned().unwrap_or_default(),
         });
 
@@ -765,14 +798,23 @@ async fn oauth_callback(
             let now = chrono::Utc::now().to_rfc3339();
             let expires = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
 
+            // Carry PKCE challenge from the login flow through to the token exchange
+            let code_challenge = params["code_challenge"].as_str().unwrap_or_default();
+            let code_challenge_method = params["code_challenge_method"]
+                .as_str()
+                .filter(|m| !m.is_empty())
+                .unwrap_or("S256");
+
             let result = sqlx::query(
-                "INSERT INTO oauth_authorization_codes (code, client_id, user_id, redirect_uri, scope, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO oauth_authorization_codes (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&auth_code)
             .bind(mcp_client_id)
             .bind(&oauth_user.login)
             .bind(mcp_redirect_uri)
             .bind(mcp_scope)
+            .bind(code_challenge)
+            .bind(code_challenge_method)
             .bind(&expires)
             .bind(&now)
             .execute(&state.pool)
@@ -831,10 +873,17 @@ pub async fn get_current_user(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Check if it's an OAuth access token
+    // Accept both server-issued access tokens (from /oauth/token) and the raw
+    // GitHub OAuth token stored on the user row
     let user = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, Option<String>)>(
-        "SELECT id, provider, login, name, email, avatar_url FROM oauth_users WHERE access_token = ?",
+        "SELECT u.id, u.provider, u.login, u.name, u.email, u.avatar_url \
+         FROM oauth_users u \
+         LEFT JOIN oauth_access_tokens t ON t.user_id = u.login \
+         WHERE t.token = ? AND t.expires_at > ? \
+         OR u.access_token = ?",
     )
+    .bind(token)
+    .bind(chrono::Utc::now().to_rfc3339())
     .bind(token)
     .fetch_optional(&state.db.pool)
     .await
