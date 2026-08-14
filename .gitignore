@@ -10,3 +10,6 @@
 .DS_Store
 Thumbs.db
 data/
+.env
+.env.local
+.env.*.local

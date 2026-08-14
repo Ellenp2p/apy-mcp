@@ -4,6 +4,7 @@ MCP (Model Context Protocol) server for DeFi lending rate aggregation across mul
 
 Currently supported:
 - **Stellar** — Blend Capital lending pools
+- **EVM** — Aave V3, Spark Savings (spUSDC/spUSDT vaults), and SparkLend lending pools
 
 ## Features
 
@@ -269,6 +270,11 @@ Headers starting with `X-Poke-*` or `X-Custom-*` are automatically captured and 
 | `get_blend_rates` | Query lending/borrowing rates for a Blend Capital pool |
 | `get_all_rates` | Get rates for all monitored pools |
 | `add_pool` | Add a pool to the monitoring list |
+
+> Current production tool: `query_rates` with `protocol` filter
+> (`aave_v3` | `spark` (Spark Savings) | `spark_savings` | `spark_lend` | `blend` | `all`).
+> Spark Savings rates come from the official Spark Savings Data API
+> (`api.spark.fi/v1/savings/{protocol}/{chain}/{token}`).
 
 ## Interest Rate Model
 

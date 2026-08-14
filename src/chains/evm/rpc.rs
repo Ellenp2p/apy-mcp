@@ -130,6 +130,20 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
     ]
 }
 
+/// Spark Lend (Aave V3 fork) data provider address for a chain, or None if
+/// Spark is not deployed there. Sources: sparkdotfi/spark-address-registry.
+pub fn spark_data_provider(chain_name: &str) -> Option<H160> {
+    match chain_name {
+        "ethereum" => Some(H160::from_slice(
+            &hex::decode("Fc21d6d146E6086B8359705C8b28512a983db0cb").unwrap(),
+        )),
+        "gnosis" => Some(H160::from_slice(
+            &hex::decode("2a002054A06546bB5a264D57A81347e23Af91D18").unwrap(),
+        )),
+        _ => None,
+    }
+}
+
 /// JSON-RPC request
 #[derive(Serialize)]
 struct JsonRpcRequest {
