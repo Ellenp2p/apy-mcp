@@ -97,81 +97,6 @@ impl LendingProvider for AaveProvider {
     }
 }
 
-/// Spark Lend (Aave V3 fork) provider for EVM chains using SparkDataProvider
-#[derive(Clone)]
-pub struct SparkProvider {
-    rpc: RpcManager,
-    /// Chains to query (empty = all chains with a Spark deployment)
-    chains: Vec<String>,
-}
-
-impl SparkProvider {
-    pub fn new(rpc: RpcManager, chains: Vec<String>) -> Self {
-        Self { rpc, chains }
-    }
-
-    /// Create a provider for all chains that have Spark deployed
-    pub fn all_chains() -> Self {
-        Self::new(RpcManager::new(), vec![])
-    }
-
-    /// Get a reference to the underlying RPC manager
-    pub fn get_rpc_manager(&self) -> &RpcManager {
-        &self.rpc
-    }
-
-    /// Fetch rates for a specific chain using Spark's data provider
-    pub async fn fetch_chain_rates(&self, chain_name: &str) -> Result<PoolRates> {
-        self.rpc
-            .get_chain(chain_name)
-            .await
-            .context(format!("Chain '{}' not found", chain_name))?;
-
-        let data_provider = rpc::spark_data_provider(chain_name)
-            .ok_or_else(|| anyhow::anyhow!("Spark not deployed on chain '{}'", chain_name))?;
-
-        fetch_protocol_rates(
-            &self.rpc,
-            chain_name,
-            data_provider,
-            "spark_lend",
-            &format!("Spark {}", capitalize(chain_name)),
-        )
-        .await
-    }
-}
-
-#[async_trait]
-impl LendingProvider for SparkProvider {
-    fn chain_name(&self) -> &str {
-        "evm"
-    }
-
-    fn protocol_name(&self) -> &str {
-        "spark_lend"
-    }
-
-    async fn get_pool_rates(&self, pool_id: &str) -> Result<PoolRates> {
-        // pool_id is the chain name for Spark Lend
-        self.fetch_chain_rates(pool_id).await
-    }
-
-    async fn list_pools(&self) -> Result<Vec<String>> {
-        if !self.chains.is_empty() {
-            return Ok(self.chains.clone());
-        }
-        // Only chains that actually have a Spark deployment
-        Ok(self
-            .rpc
-            .list_chains()
-            .await
-            .into_iter()
-            .filter(|c| rpc::spark_data_provider(&c.name).is_some())
-            .map(|c| c.name)
-            .collect())
-    }
-}
-
 /// A Spark Savings vault to monitor
 #[derive(Debug, Clone)]
 struct SavingsVault {
@@ -241,7 +166,7 @@ impl SparkSavingsProvider {
 
         Ok(PoolRates {
             chain: "ethereum".to_string(),
-            protocol: "spark_savings".to_string(),
+            protocol: "spark".to_string(),
             pool_id: vault.token.clone(),
             pool_name: format!("Spark Savings {}", data.asset.symbol),
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -411,73 +336,6 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "requires live RPC"]
-    async fn test_live_spark_ethereum() {
-        let provider = SparkProvider::all_chains();
-        provider
-            .get_rpc_manager()
-            .set_rpc_url("ethereum", "https://ethereum-rpc.publicnode.com")
-            .await;
-        let rates = provider.fetch_chain_rates("ethereum").await.unwrap();
-
-        assert_eq!(rates.chain, "ethereum");
-        assert_eq!(rates.protocol, "spark_lend");
-        assert!(!rates.assets.is_empty(), "no Spark reserves returned");
-
-        let usdc = rates
-            .assets
-            .iter()
-            .find(|a| a.asset_name == "USDC")
-            .expect("USDC not found in Spark reserves");
-        let usdt = rates
-            .assets
-            .iter()
-            .find(|a| a.asset_name == "USDT")
-            .expect("USDT not found in Spark reserves");
-
-        assert!(usdc.supply_apy > 0.0 && usdc.borrow_apy > 0.0);
-        assert!(usdt.supply_apy > 0.0 && usdt.borrow_apy > 0.0);
-
-        println!(
-            "Spark Ethereum USDC: supply={:.0} borrow={:.0} util={:.1}% supplyAPY={:.2}% borrowAPY={:.2}%",
-            usdc.total_supplied,
-            usdc.total_borrowed,
-            usdc.utilization * 100.0,
-            usdc.supply_apy * 100.0,
-            usdc.borrow_apy * 100.0
-        );
-        println!(
-            "Spark Ethereum USDT: supply={:.0} borrow={:.0} util={:.1}% supplyAPY={:.2}% borrowAPY={:.2}%",
-            usdt.total_supplied,
-            usdt.total_borrowed,
-            usdt.utilization * 100.0,
-            usdt.supply_apy * 100.0,
-            usdt.borrow_apy * 100.0
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires live RPC"]
-    async fn test_live_spark_gnosis() {
-        let provider = SparkProvider::all_chains();
-        let rates = provider.fetch_chain_rates("gnosis").await.unwrap();
-
-        assert_eq!(rates.protocol, "spark_lend");
-        let usdc = rates
-            .assets
-            .iter()
-            .find(|a| a.asset_name == "USDC")
-            .expect("USDC not found in Spark Gnosis reserves");
-        assert!(usdc.supply_apy > 0.0);
-        println!(
-            "Spark Gnosis USDC: supply={:.0} supplyAPY={:.2}% borrowAPY={:.2}%",
-            usdc.total_supplied,
-            usdc.supply_apy * 100.0,
-            usdc.borrow_apy * 100.0
-        );
-    }
-
-    #[tokio::test]
     #[ignore = "requires live Spark Savings Data API"]
     async fn test_live_spark_savings() {
         let provider = SparkSavingsProvider::all_vaults();
@@ -486,7 +344,7 @@ mod tests {
 
         for pool in pools {
             let rates = provider.get_pool_rates(&pool).await.unwrap();
-            assert_eq!(rates.protocol, "spark_savings");
+            assert_eq!(rates.protocol, "spark");
             assert_eq!(rates.assets.len(), 1);
             let asset = &rates.assets[0];
             assert!(asset.supply_apy > 0.0, "empty savings APY for {}", pool);

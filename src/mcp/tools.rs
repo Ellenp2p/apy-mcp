@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::chains::evm::rpc::RpcManager;
-use crate::chains::evm::{AaveProvider, SparkProvider, SparkSavingsProvider};
+use crate::chains::evm::{AaveProvider, SparkSavingsProvider};
 use crate::chains::stellar::BlendProvider;
 use crate::chains::LendingProvider;
 use crate::db::Database;
@@ -28,8 +28,8 @@ pub struct QueryRatesParams {
     /// Matches partial names (e.g., "USD" matches "USDC", "USDT").
     pub asset: Option<String>,
 
-    /// Filter by protocol: "aave_v3", "blend", "spark" (defaults to Spark Savings),
-    /// "spark_savings", "spark_lend", or "all" (default). "all" queries all supported protocols.
+    /// Filter by protocol: "aave_v3", "blend", "spark" (Spark Savings), or "all" (default).
+    /// "all" queries all supported protocols.
     pub protocol: Option<String>,
 
     /// Blend Capital pool contract address (C... format).
@@ -82,7 +82,6 @@ pub struct RequestMetadata {
 pub struct AppState {
     pub blend_provider: BlendProvider,
     pub aave_provider: AaveProvider,
-    pub spark_provider: SparkProvider,
     pub savings_provider: SparkSavingsProvider,
     pub monitored_pools: Arc<RwLock<Vec<String>>>,
     pub db: Option<Database>,
@@ -101,13 +100,11 @@ impl ApyMcpTools {
     pub fn new(pool_id: &str) -> Self {
         let provider = BlendProvider::default_with_pool(pool_id);
         let aave_provider = AaveProvider::all_chains();
-        let spark_provider = SparkProvider::all_chains();
         let savings_provider = SparkSavingsProvider::all_vaults();
         Self {
             state: AppState {
                 blend_provider: provider,
                 aave_provider,
-                spark_provider,
                 savings_provider,
                 monitored_pools: Arc::new(RwLock::new(vec![pool_id.to_string()])),
                 db: None,
@@ -118,14 +115,12 @@ impl ApyMcpTools {
     /// Create new tools instance with custom RPC manager
     pub fn with_rpc_manager(pool_id: &str, rpc: RpcManager) -> Self {
         let provider = BlendProvider::default_with_pool(pool_id);
-        let aave_provider = AaveProvider::new(rpc.clone(), vec![]);
-        let spark_provider = SparkProvider::new(rpc, vec![]);
+        let aave_provider = AaveProvider::new(rpc, vec![]);
         let savings_provider = SparkSavingsProvider::all_vaults();
         Self {
             state: AppState {
                 blend_provider: provider,
                 aave_provider,
-                spark_provider,
                 savings_provider,
                 monitored_pools: Arc::new(RwLock::new(vec![pool_id.to_string()])),
                 db: None,
@@ -136,14 +131,12 @@ impl ApyMcpTools {
     /// Create new tools instance with custom RPC manager and database
     pub fn with_rpc_manager_and_db(pool_id: &str, rpc: RpcManager, db: Database) -> Self {
         let provider = BlendProvider::default_with_pool(pool_id);
-        let aave_provider = AaveProvider::new(rpc.clone(), vec![]);
-        let spark_provider = SparkProvider::new(rpc, vec![]);
+        let aave_provider = AaveProvider::new(rpc, vec![]);
         let savings_provider = SparkSavingsProvider::all_vaults();
         Self {
             state: AppState {
                 blend_provider: provider,
                 aave_provider,
-                spark_provider,
                 savings_provider,
                 monitored_pools: Arc::new(RwLock::new(vec![pool_id.to_string()])),
                 db: Some(db),
@@ -180,46 +173,6 @@ impl ApyMcpTools {
                 tokio::spawn(async move {
                     if let Err(e) = db.set_cached_rates(&chain, &json).await {
                         tracing::warn!(error = %e, "Failed to cache rates");
-                    }
-                });
-            }
-        }
-
-        Ok(rates)
-    }
-
-    /// Fetch Spark rates with cache support
-    async fn fetch_spark_rates_with_cache(
-        &self,
-        chain: &str,
-        use_cache: bool,
-    ) -> Result<PoolRates, anyhow::Error> {
-        let cache_key = format!("spark:{}", chain);
-        // Try cache first (unless use_cache is false)
-        if use_cache {
-            if let Some(ref db) = self.state.db {
-                if let Ok(Some(cached_json)) =
-                    db.get_cached_rates(&cache_key, DEFAULT_CACHE_TTL).await
-                {
-                    if let Ok(rates) = serde_json::from_str::<PoolRates>(&cached_json) {
-                        tracing::debug!(chain = chain, "Returning cached Spark rates");
-                        return Ok(rates);
-                    }
-                }
-            }
-        }
-
-        // Fetch fresh data
-        let rates = self.state.spark_provider.fetch_chain_rates(chain).await?;
-
-        // Store in cache (fire and forget)
-        if let Some(ref db) = self.state.db {
-            if let Ok(json) = serde_json::to_string(&rates) {
-                let db = db.clone();
-                let key = cache_key.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = db.set_cached_rates(&key, &json).await {
-                        tracing::warn!(error = %e, "Failed to cache Spark rates");
                     }
                 });
             }
@@ -324,7 +277,7 @@ impl ApyMcpTools {
         - \"query\" (default): Query rates with filters (chain, asset, protocol, APY range, utilization)\n\
         - \"add\": Add a pool to monitoring (requires chain + pool_id)\n\
         - \"list\": List all monitored pools\n\
-        Supports Aave V3 (EVM), Spark Savings (EVM, protocol \"spark\"), SparkLend (EVM, protocol \"spark_lend\"), and Blend (Stellar). All parameters are optional for query.\n\
+        Supports Aave V3 (EVM), Spark Savings (EVM, protocol \"spark\"), and Blend (Stellar). All parameters are optional for query.\n\
         Data is cached for 60 seconds by default. Set use_cache=false to force fresh data.")]
     async fn query_rates(
         &self,
@@ -385,27 +338,23 @@ impl ApyMcpTools {
             "ethereum" | "polygon" | "arbitrum" | "optimism" | "avalanche" | "base" | "gnosis"
             | "bnb" | "scroll" | "zksync" | "sonic" => {
                 let protocol = params.protocol.as_deref().unwrap_or("aave_v3");
-                // Only Aave and SparkLend use the monitored_pools list for EVM
-                let (prefix, label) = match protocol {
-                    "spark_lend" => ("spark", "SparkLend"),
-                    "spark" | "spark_savings" => {
-                        return r#"{"success": false, "message": "Spark Savings vaults are fixed (usdc, usdt) and cannot be added via this action"}"#
-                            .to_string()
-                    }
-                    _ => ("aave", "Aave"),
-                };
+                // Only Aave uses the monitored_pools list for EVM
+                if protocol == "spark" {
+                    return r#"{"success": false, "message": "Spark Savings vaults are fixed (usdc, usdt) and cannot be added via this action"}"#
+                        .to_string();
+                }
                 let mut pools = self.state.monitored_pools.write().await;
-                let chain_key = format!("{}:{}", prefix, chain);
+                let chain_key = format!("aave:{}", chain);
                 if pools.contains(&chain_key) {
                     format!(
-                        r#"{{"success": true, "message": "{} on {} is already being monitored"}}"#,
-                        label, chain
+                        r#"{{"success": true, "message": "Aave on {} is already being monitored"}}"#,
+                        chain
                     )
                 } else {
                     pools.push(chain_key);
                     format!(
-                        r#"{{"success": true, "message": "Added {} on {} to monitoring list"}}"#,
-                        label, chain
+                        r#"{{"success": true, "message": "Added Aave on {} to monitoring list"}}"#,
+                        chain
                     )
                 }
             }
@@ -480,60 +429,8 @@ impl ApyMcpTools {
             all_results.extend(results.into_iter().flatten());
         }
 
-        // ── Spark Lend queries ──────────────────────────────────────
-        if protocol == "all" || protocol == "spark_lend" {
-            let chains = match &params.chain {
-                Some(chain) => vec![chain.clone()],
-                None => match self.state.spark_provider.list_pools().await {
-                    Ok(chains) => chains,
-                    Err(e) => return format!("{{\"error\": \"{}\"}}", e),
-                },
-            };
-
-            // Query all chains concurrently
-            let futures: Vec<_> = chains.into_iter().map(|chain| {
-                let tools = self.clone();
-                let use_cache = params.use_cache;
-                let asset_filter = params.asset.clone();
-                let p = QueryRatesParams {
-                    action: "query".to_string(),
-                    chain: None, // already resolved
-                    asset: asset_filter,
-                    protocol: None,
-                    pool_id: None,
-                    min_supply_apy: params.min_supply_apy,
-                    max_supply_apy: params.max_supply_apy,
-                    min_borrow_apy: params.min_borrow_apy,
-                    max_borrow_apy: params.max_borrow_apy,
-                    min_utilization: params.min_utilization,
-                    max_utilization: params.max_utilization,
-                    use_cache,
-                };
-                async move {
-                    match tools.fetch_spark_rates_with_cache(&chain, use_cache).await {
-                        Ok(mut rates) => {
-                            // Apply filters to assets
-                            rates.assets = Self::apply_filters(rates.assets, &p);
-                            if !rates.assets.is_empty() {
-                                Some(rates)
-                            } else {
-                                None
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(chain = %chain, error = %e, "Failed to fetch Spark rates");
-                            None
-                        }
-                    }
-                }
-            }).collect();
-
-            let results = join_all(futures).await;
-            all_results.extend(results.into_iter().flatten());
-        }
-
-        // ── Spark Savings queries ("spark" defaults to Savings) ─────
-        if protocol == "all" || protocol == "spark" || protocol == "spark_savings" {
+        // ── Spark Savings queries ("spark" = Spark Savings) ─────────
+        if protocol == "all" || protocol == "spark" {
             // Spark Savings vaults live on Ethereum mainnet
             let chain_ok = match &params.chain {
                 Some(c) => matches!(c.as_str(), "ethereum" | "mainnet" | "evm"),

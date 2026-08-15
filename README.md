@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server for DeFi lending rate aggregation across mul
 
 Currently supported:
 - **Stellar** — Blend Capital lending pools
-- **EVM** — Aave V3, Spark Savings (spUSDC/spUSDT vaults), and SparkLend lending pools
+- **EVM** — Aave V3 and Spark Savings (spUSDC/spUSDT vaults)
 
 ## Features
 
@@ -73,6 +73,24 @@ cargo run -- http \
 > **Production**: `--admin-token` is REQUIRED (without it the admin API is open).
 > `--base-url` must be your public HTTPS URL, otherwise OAuth redirects break.
 > All EVM chains use **Alchemy** by default — set `ALCHEMY_KEY` (one key covers all 11 chains).
+
+### Run in the background (daemon)
+
+`daemon` starts the HTTP server detached from the terminal — logs go to the
+file you specify and the command returns immediately:
+
+```bash
+# Equivalent to: nohup ./apy-mcp http ... > /var/log/apy-mcp.log 2>&1 &
+./apy-mcp daemon --log /var/log/apy-mcp.log \
+  --addr 0.0.0.0:3000 \
+  --base-url https://mcp.example.com \
+  --admin-token your-admin-secret \
+  --github-client-id your_client_id \
+  --github-client-secret your_client_secret \
+  --allowed-github-users octocat,583231
+```
+
+All `http` options apply. Stop it with `pkill -f apy-mcp` or `kill <PID>`.
 
 ### Docker
 
@@ -272,7 +290,7 @@ Headers starting with `X-Poke-*` or `X-Custom-*` are automatically captured and 
 | `add_pool` | Add a pool to the monitoring list |
 
 > Current production tool: `query_rates` with `protocol` filter
-> (`aave_v3` | `spark` (Spark Savings) | `spark_savings` | `spark_lend` | `blend` | `all`).
+> (`aave_v3` | `spark` (Spark Savings) | `blend` | `all`).
 > Spark Savings rates come from the official Spark Savings Data API
 > (`api.spark.fi/v1/savings/{protocol}/{chain}/{token}`).
 
