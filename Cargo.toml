@@ -23,8 +23,9 @@ tower-http = { version = "0.6", features = ["cors"] }
 http-body-util = "0.1"
 bytes = "1"
 
-# HTTP client (use native-tls for Windows compatibility)
-reqwest = { version = "0.12", features = ["json", "default-tls"] }
+# HTTP client (rustls so the Linux release builds as a static musl binary
+# that runs on any glibc version)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
