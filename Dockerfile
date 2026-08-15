@@ -9,7 +9,6 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/apy-mcp /usr/local/bin/
-COPY index.html /app/index.html
 
 # Create data directory for SQLite
 RUN mkdir -p /app/data

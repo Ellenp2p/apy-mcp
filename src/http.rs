@@ -713,17 +713,41 @@ async fn oauth_token_handler(
     }
 }
 
-/// Serve static files (index.html) as fallback for unmatched routes
-async fn static_file_handler() -> impl IntoResponse {
-    match std::fs::read_to_string("index.html") {
-        Ok(content) => (
-            StatusCode::OK,
-            [("content-type", "text/html; charset=utf-8")],
-            content,
-        )
-            .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "index.html not found").into_response(),
-    }
+/// Minimal landing page served as fallback for unmatched routes.
+/// Also the landing target of OAuth success redirects (`/?oauth=success`).
+/// Inline so it works regardless of the working directory.
+async fn index_handler() -> impl IntoResponse {
+    let html = r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APY MCP</title>
+    <style>
+        body { font-family: -apple-system, sans-serif; background: #0f1117; color: #e4e6f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+        .card { text-align: center; }
+        h1 { font-size: 28px; margin-bottom: 8px; }
+        h1 span { color: #6c5ce7; }
+        p { color: #8b8fa3; font-size: 14px; }
+        .badge { display: inline-block; margin-top: 16px; padding: 6px 16px; border-radius: 20px; background: rgba(0, 184, 148, 0.15); color: #00b894; font-size: 13px; }
+        a { color: #6c5ce7; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>&#9889; <span>APY</span> MCP</h1>
+        <p>DeFi lending rate aggregation service</p>
+        <div class="badge">&#9989; Service running</div>
+        <p style="margin-top: 24px;">Health check: <a href="/health">/health</a></p>
+    </div>
+</body>
+</html>"#;
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
 }
 
 /// Start the HTTP server
@@ -849,13 +873,13 @@ pub async fn start_http_server(
         .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
-    // Serve static files (index.html) as fallback
+    // Serve minimal landing page as fallback
     let app = Router::new()
         .merge(public_routes)
         .merge(mcp_routes)
         .merge(oauth_routes)
         .merge(oauth_callback_routes)
-        .fallback(get(static_file_handler))
+        .fallback(get(index_handler))
         .layer(cors)
         .with_state(state);
 
