@@ -113,13 +113,19 @@ async fn auth_middleware(
     // Extract Authorization header
     let auth_header = match headers.get("authorization").and_then(|v| v.to_str().ok()) {
         Some(header) => header,
-        None => return Ok(unauthorized_response(&state.base_url)),
+        None => {
+            tracing::debug!("Missing Authorization header - returning 401 challenge");
+            return Ok(unauthorized_response(&state.base_url));
+        }
     };
 
     // Extract Bearer token
     let raw_key = match auth_header.strip_prefix("Bearer ") {
         Some(key) => key,
-        None => return Ok(unauthorized_response(&state.base_url)),
+        None => {
+            tracing::debug!("Authorization header is not Bearer - returning 401 challenge");
+            return Ok(unauthorized_response(&state.base_url));
+        }
     };
 
     // Default rate limit for OAuth-authenticated requests (per user)
@@ -229,7 +235,10 @@ async fn auth_middleware(
     // 3. Not an OAuth token, try API key
     let api_key = match state.db.validate_key(raw_key).await {
         Ok(Some(key)) => key,
-        Ok(None) => return Ok(unauthorized_response(&state.base_url)),
+        Ok(None) => {
+            tracing::debug!("No valid OAuth token or API key - returning 401 challenge");
+            return Ok(unauthorized_response(&state.base_url));
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to validate API key");
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -327,6 +336,12 @@ async fn oauth_authorize_handler(
         .cloned()
         .unwrap_or_default();
     let scope = params.get("scope").cloned().unwrap_or_default();
+    tracing::info!(
+        client_id = %client_id,
+        has_code_challenge = !code_challenge.is_empty(),
+        scope = %scope,
+        "OAuth authorization page requested"
+    );
     // Query available OAuth providers from database (only GitHub is supported)
     let providers = crate::oauth::OAuthProvider::list(&http_state.db.pool)
         .await
@@ -419,24 +434,51 @@ async fn oauth_register_handler(
 
     let client_name = req["client_name"].as_str().unwrap_or("MCP Client");
 
+    // grant_types: honor the client's request but only keep grants we actually
+    // support, and always include authorization_code + refresh_token (the AS
+    // advertises both in metadata)
+    const SUPPORTED_GRANTS: [&str; 2] = ["authorization_code", "refresh_token"];
+    let mut grant_types: Vec<String> = req["grant_types"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|g| SUPPORTED_GRANTS.contains(g))
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    for gt in SUPPORTED_GRANTS {
+        if !grant_types.iter().any(|g| g == gt) {
+            grant_types.push(gt.to_string());
+        }
+    }
+
     // Store in database
     let now = chrono::Utc::now().to_rfc3339();
     sqlx::query(
         r#"
-        INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, grant_types, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&client_id)
     .bind(&client_secret_hash)
     .bind(client_name)
     .bind(serde_json::to_string(&redirect_uris).unwrap_or_default())
+    .bind(serde_json::to_string(&grant_types).unwrap_or_default())
     .bind(&now)
     .execute(&state.db.pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    tracing::info!(client_id = %client_id, client_name = %client_name, "OAuth client registered");
+    tracing::info!(
+        client_id = %client_id,
+        client_name = %client_name,
+        redirect_uris = ?redirect_uris,
+        grant_types = ?grant_types,
+        "OAuth client registered"
+    );
 
     // Return credentials (client_secret shown once)
     Ok((
@@ -446,7 +488,7 @@ async fn oauth_register_handler(
             "client_secret": client_secret_raw,
             "client_name": client_name,
             "redirect_uris": redirect_uris,
-            "grant_types": ["authorization_code"],
+            "grant_types": grant_types,
             "response_types": ["code"],
             "token_endpoint_auth_method": "client_secret_post"
         })),
@@ -475,6 +517,21 @@ fn hash_client_secret(secret: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// OAuth 2.0 error response (RFC 6749 §5.2): JSON body + proper status code
+type OAuthError = (StatusCode, axum::Json<serde_json::Value>);
+
+/// Build a standard OAuth error response and log it
+fn oauth_error(status: StatusCode, code: &str, description: &str) -> OAuthError {
+    tracing::warn!(status = %status, error = code, description = description, "OAuth error");
+    (
+        status,
+        axum::Json(serde_json::json!({
+            "error": code,
+            "error_description": description,
+        })),
+    )
+}
+
 /// RFC 7636 - PKCE S256 code challenge from a code_verifier
 fn pkce_s256_challenge(verifier: &str) -> String {
     use base64::Engine;
@@ -489,7 +546,7 @@ fn pkce_s256_challenge(verifier: &str) -> String {
 fn extract_client_credentials(
     headers: &HeaderMap,
     params: &std::collections::HashMap<String, String>,
-) -> Result<(String, String), StatusCode> {
+) -> Result<(String, String), OAuthError> {
     if let (Some(id), Some(secret)) = (params.get("client_id"), params.get("client_secret")) {
         Ok((id.clone(), secret.clone()))
     } else if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
@@ -502,18 +559,35 @@ fn extract_client_credentials(
                     if parts.len() == 2 {
                         Ok((parts[0].to_string(), parts[1].to_string()))
                     } else {
-                        Err(StatusCode::BAD_REQUEST)
+                        Err(oauth_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            "Malformed Basic authorization header",
+                        ))
                     }
                 }
-                Err(_) => Err(StatusCode::BAD_REQUEST),
+                Err(_) => Err(oauth_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Malformed Basic authorization header",
+                )),
             }
         } else {
-            Err(StatusCode::BAD_REQUEST)
+            Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Client credentials are missing",
+            ))
         }
     } else if let Some(id) = params.get("client_id") {
+        // Public client (no secret) - allowed for compatibility
         Ok((id.clone(), String::new()))
     } else {
-        Err(StatusCode::BAD_REQUEST)
+        Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Client credentials are missing",
+        ))
     }
 }
 
@@ -522,14 +596,21 @@ async fn resolve_client(
     pool: &SqlitePool,
     client_id: &str,
     client_secret: &str,
-) -> Result<(), StatusCode> {
+) -> Result<(), OAuthError> {
     let existing = sqlx::query_as::<_, (String, String)>(
         "SELECT client_id, client_secret FROM oauth_clients WHERE client_id = ?",
     )
     .bind(client_id)
     .fetch_optional(pool)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "Failed to look up OAuth client");
+        oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "Database error while resolving client",
+        )
+    })?;
 
     let secret_hash = hash_client_secret(client_secret);
 
@@ -537,23 +618,35 @@ async fn resolve_client(
         Some((_, stored_hash)) => {
             if !constant_time_eq(&secret_hash, &stored_hash) {
                 tracing::warn!(client_id = client_id, "OAuth client secret mismatch");
-                return Err(StatusCode::UNAUTHORIZED);
+                return Err(oauth_error(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_client",
+                    "Client authentication failed (invalid client secret)",
+                ));
             }
         }
         None => {
             // Auto-register for client compatibility (VS Code etc.)
             let now = chrono::Utc::now().to_rfc3339();
             sqlx::query(
-                "INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, created_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO oauth_clients (client_id, client_secret, client_name, redirect_uris, grant_types, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             )
             .bind(client_id)
             .bind(&secret_hash)
             .bind("MCP Client")
             .bind("[]")
+            .bind(r#"["authorization_code","refresh_token"]"#)
             .bind(&now)
             .execute(pool)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to auto-register OAuth client");
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "Database error while registering client",
+                )
+            })?;
             tracing::info!(client_id = client_id, "Auto-registered OAuth client");
         }
     }
@@ -566,7 +659,7 @@ async fn issue_tokens(
     user_id: &str,
     client_id: &str,
     scope: Option<&str>,
-) -> Result<(String, String, String), StatusCode> {
+) -> Result<(String, String, String), OAuthError> {
     let access_token = format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
     let refresh_token = format!("mrp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
     let now = chrono::Utc::now().to_rfc3339();
@@ -586,25 +679,56 @@ async fn issue_tokens(
     .await
     .map_err(|e| {
         tracing::error!(error = %e, "Failed to store access token");
-        StatusCode::INTERNAL_SERVER_ERROR
+        oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "Failed to issue tokens",
+        )
     })?;
 
-    tracing::info!(user_id = user_id, "Access token issued");
+    tracing::info!(user_id = user_id, client_id = client_id, "Access token issued");
     Ok((access_token, refresh_token, expires_at))
 }
 
-/// OAuth Token endpoint
+/// OAuth Token endpoint (RFC 6749 §3.2)
 /// Supports both client_secret_post (form body) and client_secret_basic (Authorization header)
 async fn oauth_token_handler(
     State(state): State<HttpState>,
     headers: HeaderMap,
     axum::extract::Form(params): axum::extract::Form<std::collections::HashMap<String, String>>,
-) -> Result<axum::Json<serde_json::Value>, StatusCode> {
-    let grant_type = params.get("grant_type").ok_or(StatusCode::BAD_REQUEST)?;
+) -> Result<axum::Json<serde_json::Value>, OAuthError> {
+    let grant_type = match params.get("grant_type") {
+        Some(g) => g.clone(),
+        None => {
+            return Err(oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Missing 'grant_type' parameter",
+            ))
+        }
+    };
+    let client_id_hint = params
+        .get("client_id")
+        .cloned()
+        .unwrap_or_else(|| "<none>".to_string());
+    tracing::info!(
+        grant_type = %grant_type,
+        client_id = %client_id_hint,
+        "OAuth token request"
+    );
 
     match grant_type.as_str() {
         "authorization_code" => {
-            let code = params.get("code").ok_or(StatusCode::BAD_REQUEST)?;
+            let code = match params.get("code") {
+                Some(c) => c,
+                None => {
+                    return Err(oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request",
+                        "Missing 'code' parameter",
+                    ))
+                }
+            };
             let (client_id, client_secret) = extract_client_credentials(&headers, &params)?;
             resolve_client(&state.db.pool, &client_id, &client_secret).await?;
 
@@ -617,14 +741,25 @@ async fn oauth_token_handler(
             .bind(chrono::Utc::now().to_rfc3339())
             .fetch_optional(&state.db.pool)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to query authorization code");
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "Database error while validating authorization code",
+                )
+            })?;
 
             let (_, _, user_id, code_challenge, code_challenge_method) =
                 match auth_code {
                     Some(row) => row,
                     None => {
                         tracing::warn!(code = %code, "Invalid or expired authorization code");
-                        return Err(StatusCode::UNAUTHORIZED);
+                        return Err(oauth_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_grant",
+                            "Invalid or expired authorization code",
+                        ));
                     }
                 };
 
@@ -642,22 +777,38 @@ async fn oauth_token_handler(
                         .as_deref()
                         .filter(|m| !m.is_empty())
                         .unwrap_or("S256");
-                    let verifier = params
-                        .get("code_verifier")
-                        .ok_or(StatusCode::BAD_REQUEST)?;
+                    let verifier = match params.get("code_verifier") {
+                        Some(v) => v,
+                        None => {
+                            return Err(oauth_error(
+                                StatusCode::BAD_REQUEST,
+                                "invalid_request",
+                                "Missing 'code_verifier' parameter (PKCE required)",
+                            ))
+                        }
+                    };
                     if method != "S256" {
-                        // Only S256 is supported
-                        return Err(StatusCode::BAD_REQUEST);
+                        return Err(oauth_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request",
+                            "Unsupported PKCE method (only S256 is supported)",
+                        ));
                     }
                     if !constant_time_eq(&pkce_s256_challenge(verifier), &challenge) {
                         tracing::warn!("PKCE code_verifier mismatch");
-                        return Err(StatusCode::UNAUTHORIZED);
+                        return Err(oauth_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_grant",
+                            "PKCE verification failed (code_verifier mismatch)",
+                        ));
                     }
                 }
             }
 
             let (access_token, refresh_token, _expires_at) =
                 issue_tokens(&state.db.pool, &user_id, &client_id, None).await?;
+
+            tracing::info!(user_id = %user_id, client_id = %client_id, "Authorization code exchanged for tokens");
 
             Ok(axum::Json(serde_json::json!({
                 "access_token": access_token,
@@ -667,7 +818,16 @@ async fn oauth_token_handler(
             })))
         }
         "refresh_token" => {
-            let refresh_token = params.get("refresh_token").ok_or(StatusCode::BAD_REQUEST)?;
+            let refresh_token = match params.get("refresh_token") {
+                Some(t) => t,
+                None => {
+                    return Err(oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request",
+                        "Missing 'refresh_token' parameter",
+                    ))
+                }
+            };
             let (client_id, client_secret) = extract_client_credentials(&headers, &params)?;
             resolve_client(&state.db.pool, &client_id, &client_secret).await?;
 
@@ -680,13 +840,24 @@ async fn oauth_token_handler(
             .bind(chrono::Utc::now().to_rfc3339())
             .fetch_optional(&state.db.pool)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to query refresh token");
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "Database error while validating refresh token",
+                )
+            })?;
 
             let (old_token, user_id, _, scope) = match row {
                 Some(row) => row,
                 None => {
-                    tracing::warn!("Invalid or expired refresh token");
-                    return Err(StatusCode::UNAUTHORIZED);
+                    tracing::warn!(client_id = %client_id, "Invalid or expired refresh token");
+                    return Err(oauth_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_grant",
+                        "Invalid or expired refresh token",
+                    ));
                 }
             };
 
@@ -700,7 +871,7 @@ async fn oauth_token_handler(
             let (access_token, refresh_token, _expires_at) =
                 issue_tokens(&state.db.pool, &user_id, &client_id, scope.as_deref()).await?;
 
-            tracing::info!(user_id = %user_id, "Access token refreshed");
+            tracing::info!(user_id = %user_id, client_id = %client_id, "Access token refreshed");
 
             Ok(axum::Json(serde_json::json!({
                 "access_token": access_token,
@@ -709,8 +880,24 @@ async fn oauth_token_handler(
                 "expires_in": 86400
             })))
         }
-        _ => Err(StatusCode::BAD_REQUEST),
+        _ => Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_grant_type",
+            &format!("Unsupported grant_type '{}'", grant_type),
+        )),
     }
+}
+
+/// JSON 405 for method mismatches (e.g. GET /oauth/token) so clients get a
+/// machine-readable error instead of an empty body
+async fn method_not_allowed_handler() -> (StatusCode, axum::Json<serde_json::Value>) {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        axum::Json(serde_json::json!({
+            "error": "method_not_allowed",
+            "error_description": "The HTTP method is not allowed for this endpoint"
+        })),
+    )
 }
 
 /// Minimal landing page served as fallback for unmatched routes.
@@ -748,6 +935,32 @@ async fn index_handler() -> impl IntoResponse {
         html,
     )
         .into_response()
+}
+
+/// Log every HTTP request (method, path, status) for debugging.
+/// Errors (4xx/5xx) at info, successful requests at debug to avoid noise
+/// from unauthenticated client probes.
+async fn access_log_middleware(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let response = next.run(request).await;
+    let status = response.status().as_u16();
+    if status >= 400 {
+        tracing::info!(
+            method = %method,
+            path = %path,
+            status = status,
+            "HTTP request failed"
+        );
+    } else {
+        tracing::debug!(
+            method = %method,
+            path = %path,
+            status = status,
+            "HTTP request"
+        );
+    }
+    response
 }
 
 /// Start the HTTP server
@@ -880,6 +1093,8 @@ pub async fn start_http_server(
         .merge(oauth_routes)
         .merge(oauth_callback_routes)
         .fallback(get(index_handler))
+        .method_not_allowed_fallback(method_not_allowed_handler)
+        .layer(axum::middleware::from_fn(access_log_middleware))
         .layer(cors)
         .with_state(state);
 

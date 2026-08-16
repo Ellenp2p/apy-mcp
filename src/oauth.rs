@@ -146,6 +146,12 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // Migration: add grant_types column if missing
+    sqlx::query("ALTER TABLE oauth_clients ADD COLUMN grant_types TEXT")
+        .execute(pool)
+        .await
+        .ok();
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS oauth_users (
@@ -166,6 +172,7 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             client_secret TEXT NOT NULL,
             client_name TEXT NOT NULL,
             redirect_uris TEXT DEFAULT '[]',
+            grant_types TEXT DEFAULT '["authorization_code","refresh_token"]',
             created_at TEXT NOT NULL
         );
 
