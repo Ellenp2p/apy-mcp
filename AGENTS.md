@@ -79,6 +79,9 @@ we additionally cache 60s in SQLite (`use_cache=false` forces fresh).
   platforms. **Linux must stay static musl** (`x86_64-unknown-linux-musl`):
   keep `reqwest` on `rustls-tls` + `default-features = false` — switching back
   to native-tls breaks the static build (glibc version errors on old servers).
+- The release build auto-injects the tag into the binary as `APY_MCP_RELEASE`,
+  so `/health` reports the real deployed version. Cargo.toml's `version` stays
+  at 0.1.0 and is NOT the deployed version — read it from `/health` instead.
 
 ## Conventions
 

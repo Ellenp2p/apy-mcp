@@ -276,12 +276,23 @@ async fn auth_middleware(
     Ok(next.run(request).await)
 }
 
+/// The effective version string:
+/// - release builds: the git tag (vX.Y.Z) injected via `APY_MCP_RELEASE`
+///   (set by `.github/workflows/release.yml`), so `/health` reports the real
+///   deployed release.
+/// - local/dev builds: the Cargo package version.
+fn build_version() -> &'static str {
+    option_env!("APY_MCP_RELEASE")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 /// Health check endpoint
 async fn health_handler() -> impl IntoResponse {
     let body = serde_json::json!({
         "status": "ok",
         "service": "apy-mcp",
-        "version": env!("CARGO_PKG_VERSION")
+        "version": build_version()
     });
     (
         StatusCode::OK,
@@ -509,6 +520,35 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_access_token_ttl_default() {
+        // No env var set -> default 24h
+        std::env::remove_var("APY_MCP_TOKEN_TTL_MINUTES");
+        assert_eq!(access_token_ttl().num_minutes(), 24 * 60);
+        assert_eq!(access_token_ttl().num_seconds(), 24 * 3600);
+    }
+
+    #[test]
+    fn test_access_token_ttl_custom() {
+        std::env::set_var("APY_MCP_TOKEN_TTL_MINUTES", "2");
+        assert_eq!(access_token_ttl().num_minutes(), 2);
+        assert_eq!(access_token_ttl().num_seconds(), 120);
+        std::env::remove_var("APY_MCP_TOKEN_TTL_MINUTES");
+    }
+
+    #[test]
+    fn test_access_token_ttl_min_floor() {
+        // Values below 1 are floored to 1 minute
+        std::env::set_var("APY_MCP_TOKEN_TTL_MINUTES", "0");
+        assert_eq!(access_token_ttl().num_minutes(), 1);
+        std::env::remove_var("APY_MCP_TOKEN_TTL_MINUTES");
+    }
+}
+
 /// Hash a client secret for storage
 fn hash_client_secret(secret: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -653,17 +693,31 @@ async fn resolve_client(
     Ok(())
 }
 
-/// Issue a new access token + refresh token pair (24h TTL)
+/// Access token TTL, configurable via `APY_MCP_TOKEN_TTL_MINUTES` (default 24h).
+/// Useful for testing the refresh flow without waiting a day: set it to a small
+/// value (e.g. 1), watch the client auto-refresh, then restore 1440.
+fn access_token_ttl() -> chrono::Duration {
+    let minutes = std::env::var("APY_MCP_TOKEN_TTL_MINUTES")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(24 * 60)
+        .max(1);
+    chrono::Duration::minutes(minutes)
+}
+
+/// Issue a new access token + refresh token pair (configurable TTL)
 async fn issue_tokens(
     pool: &SqlitePool,
     user_id: &str,
     client_id: &str,
     scope: Option<&str>,
-) -> Result<(String, String, String), OAuthError> {
+) -> Result<(String, String, i64), OAuthError> {
     let access_token = format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
     let refresh_token = format!("mrp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let ttl = access_token_ttl();
+    let expires_in = ttl.num_seconds();
     let now = chrono::Utc::now().to_rfc3339();
-    let expires_at = (chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+    let expires_at = (chrono::Utc::now() + ttl).to_rfc3339();
 
     sqlx::query(
         "INSERT INTO oauth_access_tokens (token, user_id, client_id, scope, expires_at, created_at, refresh_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -686,8 +740,8 @@ async fn issue_tokens(
         )
     })?;
 
-    tracing::info!(user_id = user_id, client_id = client_id, "Access token issued");
-    Ok((access_token, refresh_token, expires_at))
+    tracing::info!(user_id = user_id, client_id = client_id, ttl_seconds = expires_in, "Access token issued");
+    Ok((access_token, refresh_token, expires_in))
 }
 
 /// OAuth Token endpoint (RFC 6749 §3.2)
@@ -805,7 +859,7 @@ async fn oauth_token_handler(
                 }
             }
 
-            let (access_token, refresh_token, _expires_at) =
+            let (access_token, refresh_token, expires_in) =
                 issue_tokens(&state.db.pool, &user_id, &client_id, None).await?;
 
             tracing::info!(user_id = %user_id, client_id = %client_id, "Authorization code exchanged for tokens");
@@ -814,7 +868,7 @@ async fn oauth_token_handler(
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "token_type": "Bearer",
-                "expires_in": 86400
+                "expires_in": expires_in
             })))
         }
         "refresh_token" => {
@@ -868,7 +922,7 @@ async fn oauth_token_handler(
                 .await
                 .ok();
 
-            let (access_token, refresh_token, _expires_at) =
+            let (access_token, refresh_token, expires_in) =
                 issue_tokens(&state.db.pool, &user_id, &client_id, scope.as_deref()).await?;
 
             tracing::info!(user_id = %user_id, client_id = %client_id, "Access token refreshed");
@@ -877,7 +931,7 @@ async fn oauth_token_handler(
                 "access_token": access_token,
                 "refresh_token": refresh_token,
                 "token_type": "Bearer",
-                "expires_in": 86400
+                "expires_in": expires_in
             })))
         }
         _ => Err(oauth_error(

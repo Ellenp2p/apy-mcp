@@ -57,6 +57,9 @@ jobs:
             ${{ matrix.target }}-cargo-
 
       - name: Build release
+        env:
+          # Embed the git tag (vX.Y.Z) so /health reports the real release
+          APY_MCP_RELEASE: ${{ github.ref_name }}
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Rename binary (unix)
