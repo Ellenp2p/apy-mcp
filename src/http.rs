@@ -1047,6 +1047,10 @@ pub async fn start_http_server(
         .route("/oauth/authorize", get(oauth_authorize_handler))
         .route("/oauth/register", post(oauth_register_handler))
         .route("/oauth/token", post(oauth_token_handler))
+        // Alias: some clients (e.g. Poke) hardcode the token endpoint at
+        // `{base_url}/token` (RFC 6749 default) instead of honoring the
+        // metadata's `token_endpoint`. Serve both paths.
+        .route("/token", post(oauth_token_handler))
         .route(
             "/admin/keys",
             post(crate::admin::create_key).get(crate::admin::list_keys),
