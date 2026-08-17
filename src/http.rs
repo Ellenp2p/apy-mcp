@@ -524,8 +524,16 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The TTL tests mutate process-global env vars, so they must not run
+    /// concurrently with each other.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK.lock().unwrap()
+    }
+
     #[test]
     fn test_access_token_ttl_default() {
+        let _g = env_guard();
         // No env var set -> default 24h
         std::env::remove_var("APY_MCP_TOKEN_TTL_MINUTES");
         assert_eq!(access_token_ttl().num_minutes(), 24 * 60);
@@ -534,6 +542,7 @@ mod tests {
 
     #[test]
     fn test_access_token_ttl_custom() {
+        let _g = env_guard();
         std::env::set_var("APY_MCP_TOKEN_TTL_MINUTES", "2");
         assert_eq!(access_token_ttl().num_minutes(), 2);
         assert_eq!(access_token_ttl().num_seconds(), 120);
@@ -542,10 +551,37 @@ mod tests {
 
     #[test]
     fn test_access_token_ttl_min_floor() {
+        let _g = env_guard();
         // Values below 1 are floored to 1 minute
         std::env::set_var("APY_MCP_TOKEN_TTL_MINUTES", "0");
         assert_eq!(access_token_ttl().num_minutes(), 1);
         std::env::remove_var("APY_MCP_TOKEN_TTL_MINUTES");
+    }
+
+    #[test]
+    fn test_refresh_token_ttl_default() {
+        let _g = env_guard();
+        std::env::remove_var("APY_MCP_REFRESH_TTL_DAYS");
+        assert_eq!(refresh_token_ttl().num_days(), 30);
+    }
+
+    #[test]
+    fn test_refresh_token_ttl_custom() {
+        let _g = env_guard();
+        std::env::set_var("APY_MCP_REFRESH_TTL_DAYS", "7");
+        assert_eq!(refresh_token_ttl().num_days(), 7);
+        std::env::remove_var("APY_MCP_REFRESH_TTL_DAYS");
+    }
+
+    #[test]
+    fn test_refresh_outlives_access() {
+        let _g = env_guard();
+        // Refresh TTL must always be >= access TTL so the client can rotate
+        std::env::set_var("APY_MCP_TOKEN_TTL_MINUTES", "2");
+        std::env::set_var("APY_MCP_REFRESH_TTL_DAYS", "1");
+        assert!(refresh_token_ttl() > access_token_ttl());
+        std::env::remove_var("APY_MCP_TOKEN_TTL_MINUTES");
+        std::env::remove_var("APY_MCP_REFRESH_TTL_DAYS");
     }
 }
 
@@ -705,7 +741,21 @@ fn access_token_ttl() -> chrono::Duration {
     chrono::Duration::minutes(minutes)
 }
 
-/// Issue a new access token + refresh token pair (configurable TTL)
+/// Refresh token lifetime, configurable via `APY_MCP_REFRESH_TTL_DAYS`
+/// (default 30 days). Refresh tokens live much longer than access tokens so
+/// clients can silently rotate without forcing a re-login.
+fn refresh_token_ttl() -> chrono::Duration {
+    let days = std::env::var("APY_MCP_REFRESH_TTL_DAYS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(30)
+        .max(1);
+    chrono::Duration::days(days)
+}
+
+/// Issue a new access token + refresh token pair.
+/// Access token TTL is short (configurable); the refresh token outlives it
+/// (default 30 days) so the client can rotate without re-authenticating.
 async fn issue_tokens(
     pool: &SqlitePool,
     user_id: &str,
@@ -714,13 +764,17 @@ async fn issue_tokens(
 ) -> Result<(String, String, i64), OAuthError> {
     let access_token = format!("mcp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
     let refresh_token = format!("mrp_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
-    let ttl = access_token_ttl();
-    let expires_in = ttl.num_seconds();
+    let access_ttl = access_token_ttl();
+    // Refresh must never expire before the access token, otherwise rotation
+    // silently breaks. Clamp it to be at least the access TTL.
+    let refresh_ttl = refresh_token_ttl().max(access_ttl);
+    let expires_in = access_ttl.num_seconds();
     let now = chrono::Utc::now().to_rfc3339();
-    let expires_at = (chrono::Utc::now() + ttl).to_rfc3339();
+    let expires_at = (chrono::Utc::now() + access_ttl).to_rfc3339();
+    let refresh_expires_at = (chrono::Utc::now() + refresh_ttl).to_rfc3339();
 
     sqlx::query(
-        "INSERT INTO oauth_access_tokens (token, user_id, client_id, scope, expires_at, created_at, refresh_token) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO oauth_access_tokens (token, user_id, client_id, scope, expires_at, created_at, refresh_token, refresh_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&access_token)
     .bind(user_id)
@@ -729,6 +783,7 @@ async fn issue_tokens(
     .bind(&expires_at)
     .bind(&now)
     .bind(&refresh_token)
+    .bind(&refresh_expires_at)
     .execute(pool)
     .await
     .map_err(|e| {
@@ -885,9 +940,10 @@ async fn oauth_token_handler(
             let (client_id, client_secret) = extract_client_credentials(&headers, &params)?;
             resolve_client(&state.db.pool, &client_id, &client_secret).await?;
 
-            // Look up the row that owns this refresh token
+            // Look up the row that owns this refresh token (refresh token has
+            // its own, longer lifetime than the access token)
             let row = sqlx::query_as::<_, (String, String, String, Option<String>)>(
-                "SELECT token, user_id, client_id, scope FROM oauth_access_tokens WHERE refresh_token = ? AND client_id = ? AND expires_at > ?",
+                "SELECT token, user_id, client_id, scope FROM oauth_access_tokens WHERE refresh_token = ? AND client_id = ? AND refresh_expires_at > ?",
             )
             .bind(refresh_token)
             .bind(&client_id)

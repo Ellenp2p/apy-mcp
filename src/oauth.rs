@@ -135,6 +135,20 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await
         .ok();
+    sqlx::query("ALTER TABLE oauth_access_tokens ADD COLUMN refresh_expires_at TEXT")
+        .execute(pool)
+        .await
+        .ok();
+
+    // Backfill refresh_expires_at for rows that existed before this column was
+    // added, so outstanding refresh tokens keep working after the upgrade.
+    // Refresh tokens get 30 days from the access token's expiry.
+    sqlx::query(
+        "UPDATE oauth_access_tokens SET refresh_expires_at = strftime('%Y-%m-%dT%H:%M:%fZ', expires_at, '+30 days') WHERE refresh_expires_at IS NULL AND refresh_token IS NOT NULL",
+    )
+    .execute(pool)
+    .await
+    .ok();
     sqlx::query("ALTER TABLE oauth_authorization_codes ADD COLUMN code_challenge TEXT")
         .execute(pool)
         .await
@@ -195,7 +209,8 @@ pub async fn init_oauth_db(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             scope TEXT,
             expires_at TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            refresh_token TEXT
+            refresh_token TEXT,
+            refresh_expires_at TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_oauth_refresh_token ON oauth_access_tokens(refresh_token);
