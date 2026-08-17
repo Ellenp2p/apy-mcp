@@ -6,6 +6,8 @@ Currently supported:
 - **Stellar** — Blend Capital lending pools
 - **EVM** — Aave V3 and Spark Savings (spUSDC/spUSDT vaults)
 
+> 技术复盘：OAuth 接入踩坑与最终实现见 [docs/oauth-retrospective.md](docs/oauth-retrospective.md)
+
 ## Features
 
 - Real-time lending/borrowing APY calculation from on-chain data
