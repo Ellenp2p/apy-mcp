@@ -864,18 +864,22 @@ async fn oauth_callback(
             }
         } else {
             // No MCP OAuth params, redirect to success page
+            // (include the GitHub token so the web UI can call the API directly)
             format!(
-                "/?oauth=success&provider={}&user={}",
+                "/?oauth=success&provider={}&user={}&token={}",
                 urlencoding::encode(&provider_name),
-                urlencoding::encode(&oauth_user.login)
+                urlencoding::encode(&oauth_user.login),
+                urlencoding::encode(&access_token)
             )
         }
     } else {
         // No MCP OAuth flow, redirect to success page
+        // (include the GitHub token so the web UI can call the API directly)
         format!(
-            "/?oauth=success&provider={}&user={}",
+            "/?oauth=success&provider={}&user={}&token={}",
             urlencoding::encode(&provider_name),
-            urlencoding::encode(&oauth_user.login)
+            urlencoding::encode(&oauth_user.login),
+            urlencoding::encode(&access_token)
         )
     };
     Ok(Redirect::to(&redirect_url).into_response())

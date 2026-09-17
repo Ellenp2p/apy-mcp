@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use tracing::info;
 
 use crate::chains::LendingProvider;
-use crate::mcp::types::PoolRates;
+use crate::service::types::PoolRates;
 
 /// Soroban RPC endpoint for Stellar mainnet
 pub const SOROBAN_RPC_URL: &str = "https://mainnet.sorobanrpc.com";

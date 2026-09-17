@@ -8,6 +8,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
+#[cfg(feature = "mcp")]
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -53,7 +54,10 @@ impl RateLimiter {
 /// Shared application state for the HTTP server
 #[derive(Clone)]
 pub struct HttpState {
-    pub tools: ApyMcpTools,
+    /// MCP tools; `None` when built without the `mcp` feature or when
+    /// `--enable-mcp=false` was passed.
+    pub tools: Option<ApyMcpTools>,
+    pub service: crate::service::rates::RateService,
     pub db: Database,
     pub admin_token: Option<String>,
     pub base_url: String,
@@ -90,17 +94,47 @@ async fn check_rate_limit(state: &HttpState, key: &str, limit: usize) -> Result<
 
 /// Build a 401 response with the RFC 9728 bearer challenge header so MCP
 /// clients (opencode, VS Code, Claude Desktop) know how to start OAuth.
-fn unauthorized_response(base_url: &str) -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(
-            WWW_AUTHENTICATE,
-            format!(
-                r#"Bearer resource="{base_url}/mcp", authorization_servers="{base_url}""#
-            ),
-        )],
-    )
-        .into_response()
+/// Browsers (Accept: text/html) get a friendly HTML page pointing at /docs
+/// instead of a bare empty 401.
+fn unauthorized_response(base_url: &str, accept_html: bool) -> Response {
+    let challenge = format!(
+        r#"Bearer resource="{base_url}/mcp", authorization_servers="{base_url}""#
+    );
+    if accept_html {
+        let html = format!(
+            r#"<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>需要认证 — APY MCP</title><link rel="stylesheet" href="/style.css"></head>
+<body><main class="container">
+<section class="hero"><h1>这个端点需要认证</h1>
+<p><code>{base_url}/mcp</code> 是 MCP 协议端点,供 AI 客户端通过 Streamable HTTP 连接,不支持浏览器直接访问。</p></section>
+<section class="card doc">
+<h2>接下来可以</h2>
+<ol>
+<li>查看 <a href="/docs">MCP 接入指南</a>,了解如何在 Claude / Cursor / VS Code 中配置客户端;</li>
+<li>在 <a href="/">首页</a> 点 "GitHub 登录" 获取访问 token;</li>
+<li>如果你只是要查利率,直接用公开的 <a href="/">网页查询</a> 或 <code>GET /api/v1/rates</code> REST API。</li>
+</ol>
+</section></main></body></html>"#
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(WWW_AUTHENTICATE, challenge)],
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            html,
+        )
+            .into_response();
+    }
+    (StatusCode::UNAUTHORIZED, [(WWW_AUTHENTICATE, challenge)]).into_response()
+}
+
+/// True when the client likely is a browser asking for HTML.
+fn wants_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|a| a.contains("text/html"))
+        .unwrap_or(false)
 }
 
 /// API Key authentication middleware with rate limiting
@@ -115,7 +149,7 @@ async fn auth_middleware(
         Some(header) => header,
         None => {
             tracing::debug!("Missing Authorization header - returning 401 challenge");
-            return Ok(unauthorized_response(&state.base_url));
+            return Ok(unauthorized_response(&state.base_url, wants_html(&headers)));
         }
     };
 
@@ -124,7 +158,7 @@ async fn auth_middleware(
         Some(key) => key,
         None => {
             tracing::debug!("Authorization header is not Bearer - returning 401 challenge");
-            return Ok(unauthorized_response(&state.base_url));
+            return Ok(unauthorized_response(&state.base_url, wants_html(&headers)));
         }
     };
 
@@ -237,7 +271,7 @@ async fn auth_middleware(
         Ok(Some(key)) => key,
         Ok(None) => {
             tracing::debug!("No valid OAuth token or API key - returning 401 challenge");
-            return Ok(unauthorized_response(&state.base_url));
+            return Ok(unauthorized_response(&state.base_url, wants_html(&headers)));
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to validate API key");
@@ -1010,9 +1044,35 @@ async fn method_not_allowed_handler() -> (StatusCode, axum::Json<serde_json::Val
     )
 }
 
-/// Minimal landing page served as fallback for unmatched routes.
-/// Also the landing target of OAuth success redirects (`/?oauth=success`).
-/// Inline so it works regardless of the working directory.
+/// GET /mcp when the binary was built without the "mcp" feature.
+#[cfg(not(feature = "mcp"))]
+async fn mcp_unavailable_handler() -> (StatusCode, axum::Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({
+            "error": "mcp_not_available",
+            "message": "This server was built without the 'mcp' feature; the MCP endpoint is not available.",
+            "docs": "/docs"
+        })),
+    )
+}
+
+/// GET /mcp when the server was started with --enable-mcp=false.
+#[cfg(feature = "mcp")]
+async fn mcp_disabled_handler() -> (StatusCode, axum::Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        axum::Json(serde_json::json!({
+            "error": "mcp_disabled",
+            "message": "The MCP endpoint is disabled on this server (started with --enable-mcp=false).",
+            "docs": "/docs"
+        })),
+    )
+}
+
+/// Minimal landing page served as fallback for non-web builds.
+/// With the "web" feature, the embedded frontend (`crate::web`) is used instead.
+#[cfg(not(feature = "web"))]
 async fn index_handler() -> impl IntoResponse {
     let html = r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1047,20 +1107,71 @@ async fn index_handler() -> impl IntoResponse {
         .into_response()
 }
 
-/// Log every HTTP request (method, path, status) for debugging.
+/// Static MCP usage guide for non-web builds (the web feature has the full
+/// Dioxus SSR docs page at the same path).
+#[cfg(not(feature = "web"))]
+async fn docs_fallback_handler() -> impl IntoResponse {
+    let html = r#"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>APY MCP - Docs</title>
+    <style>
+        body { font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif; background: #0f1117; color: #e4e6f0; max-width: 720px; margin: 0 auto; padding: 40px 20px; line-height: 1.7; }
+        h1 { font-size: 26px; } h1 span { color: #6c5ce7; }
+        h2 { font-size: 18px; margin-top: 32px; color: #c9cbe0; }
+        p, li { color: #8b8fa3; font-size: 14.5px; }
+        code { background: #171a23; padding: 2px 8px; border-radius: 6px; font-size: 13px; }
+        pre { background: #171a23; padding: 14px 16px; border-radius: 10px; overflow-x: auto; }
+        pre code { padding: 0; background: none; }
+        a { color: #6c5ce7; }
+    </style>
+</head>
+<body>
+    <h1>&#9889; <span>APY</span> MCP &mdash; 接入指南</h1>
+    <p>MCP 端点:<code>&lt;base_url&gt;/mcp</code>(MCP Streamable HTTP,需要认证)</p>
+    <h2>客户端配置(Claude Desktop / Cursor)</h2>
+    <pre><code>{
+  "mcpServers": {
+    "apy-mcp": {
+      "url": "https://your-host/mcp",
+      "headers": { "Authorization": "Bearer &lt;API_KEY 或 OAuth token&gt;" }
+    }
+  }
+}</code></pre>
+    <h2>认证</h2>
+    <p>人类用户:客户端首次连接会自动弹出 GitHub OAuth 登录。<br>
+    服务器/脚本:用 admin token 调用 <code>POST /admin/keys</code> 创建 API key。</p>
+    <h2>公开 REST API(无需认证)</h2>
+    <p><code>GET /api/v1/rates?asset=USDC</code>,以及 <code>/api/v1/chains</code>、<code>/api/v1/protocols</code>、<code>/api/v1/pools</code>。</p>
+    <p><a href="/">&larr; 返回首页</a></p>
+</body>
+</html>"#;
+    (
+        StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
 /// Errors (4xx/5xx) at info, successful requests at debug to avoid noise
 /// from unauthenticated client probes.
+/// Log every HTTP request (method, path, status) for debugging.
+/// Errors (4xx/5xx) at info, successful requests at debug to avoid noise.
 async fn access_log_middleware(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let response = next.run(request).await;
     let status = response.status().as_u16();
-    if status >= 400 {
+    // Errors (4xx/5xx) and API/MCP calls at info; other requests at debug
+    // to avoid noise from static assets.
+    if status >= 400 || path.starts_with("/api/") || path.starts_with("/mcp") {
         tracing::info!(
             method = %method,
             path = %path,
             status = status,
-            "HTTP request failed"
+            "HTTP request"
         );
     } else {
         tracing::debug!(
@@ -1076,18 +1187,46 @@ async fn access_log_middleware(request: Request, next: Next) -> Response {
 /// Start the HTTP server
 pub async fn start_http_server(
     addr: SocketAddr,
-    tools: ApyMcpTools,
+    tools: Option<ApyMcpTools>,
+    service: crate::service::rates::RateService,
     db: Database,
     admin_token: Option<String>,
     base_url: String,
 ) -> anyhow::Result<()> {
     let state = HttpState {
         tools: tools.clone(),
+        service,
         db: db.clone(),
         admin_token: admin_token.clone(),
         base_url: base_url.clone(),
         rate_limiters: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
+
+    // Warm the rate cache in the background so the first page/API hit is fast.
+    {
+        let svc = state.service.clone();
+        tokio::spawn(async move {
+            let filters = crate::service::types::QueryRatesParams {
+                action: "query".to_string(),
+                chain: None,
+                asset: None,
+                protocol: None,
+                pool_id: None,
+                min_supply_apy: None,
+                max_supply_apy: None,
+                min_borrow_apy: None,
+                max_borrow_apy: None,
+                min_utilization: None,
+                max_utilization: None,
+                use_cache: true,
+                cache_only: false,
+            };
+            match svc.query(&filters).await {
+                Ok(resp) => tracing::info!(pools = resp.pools.len(), "prewarmed rate cache"),
+                Err(e) => tracing::warn!(error = %e, "rate cache prewarm failed"),
+            }
+        });
+    }
 
     // Build public routes (no auth needed)
     let public_routes = Router::new()
@@ -1155,39 +1294,64 @@ pub async fn start_http_server(
             delete(crate::admin::remove_github_allowlist),
         );
 
-    // Build MCP service - configure allowed hosts from base_url
-    let tools_for_service = tools.clone();
-    let mut allowed_hosts: Vec<String> = vec![
-        "localhost".into(),
-        "127.0.0.1".into(),
-        "::1".into(),
-        "0.0.0.0".into(),
-    ];
-    // Extract hostname from base_url and add to allowed hosts
-    if let Ok(url) = url::Url::parse(&base_url) {
-        if let Some(host) = url.host_str() {
-            if !allowed_hosts.contains(&host.to_string()) {
-                allowed_hosts.push(host.to_string());
+    // Public MCP usage guide. With the "web" feature it's a Dioxus SSR page;
+    // otherwise a small static page.
+    #[cfg(feature = "web")]
+    let public_routes = public_routes.route("/docs", get(crate::web::docs_handler));
+    #[cfg(not(feature = "web"))]
+    let public_routes = public_routes.route("/docs", get(docs_fallback_handler));
+
+    // Build public, read-only API routes. Rate data is public (like the
+    // protocols' own dashboards); responses are served from the shared cache.
+    let api_routes = Router::new()
+        .route("/api/v1/rates", get(crate::api::get_rates))
+        .route("/api/v1/chains", get(crate::api::get_chains))
+        .route("/api/v1/protocols", get(crate::api::get_protocols))
+        .route("/api/v1/pools", get(crate::api::get_pools));
+
+    // Build MCP routes. Three cases:
+    // - built without the "mcp" feature  -> 404 "not compiled in"
+    // - --enable-mcp=false               -> 404 "disabled on this server"
+    // - otherwise                        -> the streamable MCP service (auth required)
+    #[cfg(feature = "mcp")]
+    let mcp_routes = match tools.clone() {
+        Some(tools_for_service) => {
+            let mut allowed_hosts: Vec<String> = vec![
+                "localhost".into(),
+                "127.0.0.1".into(),
+                "::1".into(),
+                "0.0.0.0".into(),
+            ];
+            // Extract hostname from base_url and add to allowed hosts
+            if let Ok(url) = url::Url::parse(&base_url) {
+                if let Some(host) = url.host_str() {
+                    if !allowed_hosts.contains(&host.to_string()) {
+                        allowed_hosts.push(host.to_string());
+                    }
+                }
             }
+            tracing::info!("MCP allowed hosts: {:?}", allowed_hosts);
+
+            let mcp_service: StreamableHttpService<
+                crate::mcp::tools::ApyMcpTools,
+                LocalSessionManager,
+            > = StreamableHttpService::new(
+                move || Ok(tools_for_service.clone()),
+                LocalSessionManager::default().into(),
+                StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts),
+            );
+
+            Router::new()
+                .nest_service("/mcp", mcp_service)
+                .layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    auth_middleware,
+                ))
         }
-    }
-    tracing::info!("MCP allowed hosts: {:?}", allowed_hosts);
-
-    let mcp_service: StreamableHttpService<crate::mcp::tools::ApyMcpTools, LocalSessionManager> =
-        StreamableHttpService::new(
-            move || Ok(tools_for_service.clone()),
-            LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default().with_allowed_hosts(allowed_hosts),
-        );
-
-    // Build MCP routes (auth required) - use nest_service like official example
-    let mcp_routes =
-        Router::new()
-            .nest_service("/mcp", mcp_service)
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                auth_middleware,
-            ));
+        None => Router::new().route("/mcp", get(mcp_disabled_handler)),
+    };
+    #[cfg(not(feature = "mcp"))]
+    let mcp_routes = Router::new().route("/mcp", get(mcp_unavailable_handler));
 
     // Build OAuth routes if configured
     let oauth_routes = crate::oauth::oauth_router_without_state();
@@ -1201,8 +1365,23 @@ pub async fn start_http_server(
         .allow_headers(Any);
 
     // Serve minimal landing page as fallback
+    // Serve the embedded web frontend as fallback (non-web builds: minimal page)
+    #[cfg(feature = "web")]
     let app = Router::new()
         .merge(public_routes)
+        .merge(api_routes)
+        .merge(mcp_routes)
+        .merge(oauth_routes)
+        .merge(oauth_callback_routes)
+        .fallback(crate::web::fallback_handler)
+        .method_not_allowed_fallback(method_not_allowed_handler)
+        .layer(axum::middleware::from_fn(access_log_middleware))
+        .layer(cors)
+        .with_state(state);
+    #[cfg(not(feature = "web"))]
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(api_routes)
         .merge(mcp_routes)
         .merge(oauth_routes)
         .merge(oauth_callback_routes)

@@ -1,20 +1,41 @@
 #![allow(dead_code)]
 
 mod admin;
+mod api;
 mod chains;
 mod db;
 mod http;
+#[cfg(feature = "mcp")]
 mod mcp;
+#[cfg(not(feature = "mcp"))]
+mod mcp {
+    //! Stub types so the rest of the crate compiles without the MCP feature.
+    pub mod tools {
+        #[derive(Clone)]
+        pub struct ApyMcpTools;
+
+        #[derive(Debug, Clone)]
+        pub struct RequestMetadata {
+            pub custom_headers: Vec<(String, String)>,
+        }
+    }
+}
 mod oauth;
+mod service;
+#[cfg(feature = "web")]
+mod web;
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+#[cfg(feature = "mcp")]
 use rmcp::transport::stdio;
+#[cfg(feature = "mcp")]
 use rmcp::ServiceExt;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "mcp")]
 use mcp::tools::ApyMcpTools;
 
 /// Default Blend Capital pool on Stellar mainnet
@@ -32,6 +53,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Run as stdio MCP server (for local use with Claude Desktop, etc.)
+    #[cfg(feature = "mcp")]
     Stdio {
         /// Default Blend pool ID
         #[arg(long, default_value = DEFAULT_BLEND_POOL)]
@@ -73,6 +95,12 @@ struct HttpArgs {
     /// Base URL for OAuth redirects (e.g., "https://mcp.example.com", or set BASE_URL env var)
     #[arg(long, env = "BASE_URL")]
     base_url: Option<String>,
+
+    /// Enable the MCP endpoint at /mcp (only available when built with the "mcp" feature;
+    /// or set ENABLE_MCP env var)
+    #[cfg(feature = "mcp")]
+    #[arg(long, env = "ENABLE_MCP", default_value = "true", action = clap::ArgAction::Set)]
+    enable_mcp: bool,
 
     /// Default Blend pool ID
     #[arg(long, default_value = DEFAULT_BLEND_POOL)]
@@ -190,6 +218,10 @@ fn append_http_args(cmd: &mut std::process::Command, args: &HttpArgs) {
     }
     if let Some(v) = &args.base_url {
         cmd.args(["--base-url", v]);
+    }
+    #[cfg(feature = "mcp")]
+    if !args.enable_mcp {
+        cmd.args(["--enable-mcp", "false"]);
     }
     if let Some(v) = &args.github_client_id {
         cmd.args(["--github-client-id", v]);
@@ -395,6 +427,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        #[cfg(feature = "mcp")]
         Commands::Stdio { pool_id } => {
             tracing::info!("Starting apy-mcp server in stdio mode");
             let tools = ApyMcpTools::new(&pool_id);
@@ -492,6 +525,8 @@ async fn run_http(args: HttpArgs) -> Result<()> {
         db_path,
         admin_token,
         base_url,
+        #[cfg(feature = "mcp")]
+        enable_mcp,
         pool_id,
         github_client_id,
         github_client_secret,
@@ -618,13 +653,22 @@ async fn run_http(args: HttpArgs) -> Result<()> {
     set_rpc_url!("zksync", evm_rpc_zksync, "EVM_RPC_ZKSYNC");
     set_rpc_url!("sonic", evm_rpc_sonic, "EVM_RPC_SONIC");
 
-    let tools = ApyMcpTools::with_rpc_manager_and_db(&pool_id, rpc, db.clone());
+    let service = service::rates::RateService::with_rpc_manager_and_db(&pool_id, rpc, db.clone());
+    #[cfg(feature = "mcp")]
+    let tools = if enable_mcp {
+        Some(ApyMcpTools::from_service(service.clone()))
+    } else {
+        tracing::info!("MCP endpoint disabled via --enable-mcp=false");
+        None
+    };
+    #[cfg(not(feature = "mcp"))]
+    let tools: Option<mcp::tools::ApyMcpTools> = None;
     let addr: std::net::SocketAddr = addr.parse()?;
 
     // Fall back to environment variable if not provided via CLI
     let admin_token = admin_token.or_else(|| std::env::var("ADMIN_TOKEN").ok());
 
     // Start HTTP server (OAuth providers are now managed via database)
-    http::start_http_server(addr, tools, db, admin_token, base_url).await?;
+    http::start_http_server(addr, tools, service, db, admin_token, base_url).await?;
     Ok(())
 }

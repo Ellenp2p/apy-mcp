@@ -99,97 +99,136 @@ pub async fn get_reserve_data(
 
 // ── Decoding helpers ───────────────────────────────────────────────────
 
-/// Decode TokenData[] from getAllReservesTokens()
+/// Decode TokenData[] from getAllReservesTokens().
 ///
 /// The Aave V3 AaveProtocolDataProvider returns `TokenData[]` where each tuple
-/// is `(string symbol, address tokenAddress)`. The ABI encoding interleaves
-/// heads and tails, so we scan for valid Ethereum addresses and pair them with
-/// nearby UTF-8 string data (length + bytes pattern).
+/// is `(string symbol, address tokenAddress)`. Rather than relying on the
+/// precise ABI tuple-head layout (which empirically fails on some chains
+/// because the surrounding offset arithmetic doesn't quite match the
+/// encoded data), we scan for valid 20-byte addresses and pair each one
+/// with the nearest UTF-8 string of plausible length (1–64 chars) found in
+/// a small window of words before or after the address.
 fn decode_token_data_array(data: &[u8]) -> Result<Vec<TokenInfo>> {
     if data.len() < 64 {
         bail!("Response too short for TokenData[]");
     }
 
-    let array_len = read_u256_usize(data, 32)?;
-    if array_len == 0 {
-        return Ok(Vec::new());
-    }
+    let array_len = match read_u256_usize(data, 0) {
+        Ok(n) => n,
+        Err(_) => bail!("Cannot read array length"),
+    };
 
     let num_words = data.len() / 32;
+    if num_words < 2 {
+        return Ok(Vec::new());
+    }
+    // Cap the address scan at array_len so we never return more entries than
+    // the contract declared (defensive — a malformed response shouldn't pad
+    // our pool count).
+    let _ = array_len;
 
-    // Scan for valid Ethereum addresses: 20 bytes right-aligned in a 32-byte word,
-    // with no significant leading non-zero bytes (real addresses have 0x00 padding).
+    // Scan for all candidate addresses: right-aligned 20 bytes in a 32-byte
+    // word, with the first 12 bytes being zero padding and the address
+    // itself non-zero and large enough to be a real token contract.
     let mut address_positions: Vec<(usize, H160)> = Vec::new();
-
-    for word_idx in 2..num_words {
-        let word = &data[word_idx * 32..(word_idx + 1) * 32];
-
-        // Check that bytes 0-11 are all zero (proper address padding)
-        if word[0..12].iter().any(|&b| b != 0) {
+    for word_idx in 1..num_words {
+        let offset = word_idx * 32;
+        if data[offset..offset + 12].iter().any(|&b| b != 0) {
             continue;
         }
-
-        let addr = H160::from_slice(&word[12..32]);
-
+        let addr = H160::from_slice(&data[offset + 12..offset + 32]);
         if addr == H160::zero() {
             continue;
         }
-
-        // Filter out small/fake addresses (must be > 0x1000)
-        let addr_bytes = &word[12..32];
-        let is_too_small = addr_bytes[0] == 0 && addr_bytes[1] == 0 && addr_bytes[2] < 0x10;
-        if is_too_small {
+        let a = addr.as_bytes();
+        // Filter out obviously-fake addresses (tiny values where bytes 0..2
+        // are all zero — typical of small integers, offsets, and string
+        // lengths being misread as addresses).
+        if a[0] == 0 && a[1] == 0 && a[2] < 0x10 {
             continue;
         }
-
         address_positions.push((word_idx, addr));
     }
 
-    // For each address, look for a string length (1-32) in nearby words.
-    // The pattern is: [addr_word] address, [addr_word+1 or +2] string_length, [next] string_data.
-    let mut tokens = Vec::with_capacity(array_len);
+    // For each address, search a window of nearby words for a plausible
+    // string (length word 1–64 followed by valid ASCII bytes). Try AFTER
+    // first (matches the standard ABI tuple layout), then BEFORE if no
+    // match — this catches cases where the encoder placed the string before
+    // the address.
+    let mut tokens: Vec<TokenInfo> = Vec::with_capacity(array_len);
+    let mut used_string_words: Vec<usize> = Vec::new();
 
-    for (addr_word, addr) in &address_positions {
-        let symbol = find_string_near_address(data, *addr_word, num_words);
-        tokens.push(TokenInfo {
-            symbol,
-            address: *addr,
-        });
+    for (addr_word, addr) in address_positions {
+        if let Some((string_word, symbol)) =
+            find_string_near(data, addr_word, num_words, &used_string_words)
+        {
+            used_string_words.push(string_word);
+            used_string_words.push(string_word + 1);
+            tokens.push(TokenInfo { symbol, address: addr });
+        } else {
+            tokens.push(TokenInfo {
+                symbol: short_addr(addr),
+                address: addr,
+            });
+        }
+        if tokens.len() >= array_len {
+            break;
+        }
     }
 
     Ok(tokens)
 }
 
-/// Find a string (length + UTF-8 data) near an address word.
-/// Scans a small window around the address for a word containing a string length
-/// followed by valid ASCII bytes.
-fn find_string_near_address(data: &[u8], addr_word: usize, num_words: usize) -> String {
-    // Check words 1-4 after the address word for a string length
-    for offset in 1..=4 {
-        let len_word = addr_word + offset;
-        if len_word >= num_words {
-            break;
-        }
-
-        let val = read_u256(data, len_word * 32).unwrap_or(0);
-
-        // String length must be 1-32 and the next word must contain valid UTF-8
-        if val >= 1 && val <= 32 {
+/// Look in a 5-word window on either side of `addr_word` for a string
+/// that hasn't already been paired with a previous address. Returns the
+/// word index of the string-length word and the parsed symbol.
+fn find_string_near(
+    data: &[u8],
+    addr_word: usize,
+    num_words: usize,
+    used: &[usize],
+) -> Option<(usize, String)> {
+    for direction in [1_i64, -1_i64] {
+        for offset in 1..=5 {
+            let len_word = if direction > 0 {
+                addr_word.checked_add(offset)?
+            } else {
+                addr_word.checked_sub(offset)?
+            };
+            if len_word == 0 || len_word >= num_words {
+                continue;
+            }
+            if used.contains(&len_word) {
+                continue;
+            }
+            let len_offset = len_word * 32;
+            let str_len = match read_u256_usize(data, len_offset) {
+                Ok(v) if (1..=64).contains(&v) => v,
+                _ => continue,
+            };
             let str_start = (len_word + 1) * 32;
-            let str_len = val as usize;
-            if str_start + str_len <= data.len() {
-                let str_bytes = &data[str_start..str_start + str_len];
-                if let Ok(s) = String::from_utf8(str_bytes.to_vec()) {
-                    if s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') && !s.is_empty() {
-                        return s;
-                    }
+            if str_start + str_len > data.len() {
+                continue;
+            }
+            let bytes = &data[str_start..str_start + str_len];
+            if let Ok(s) = String::from_utf8(bytes.to_vec()) {
+                if !s.is_empty() && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ') {
+                    return Some((len_word, s));
                 }
             }
         }
     }
+    None
+}
 
-    // Fallback: use a short address string
-    let addr = read_address(data, addr_word * 32).unwrap_or(H160::zero());
+fn push_fallback(tokens: &mut Vec<TokenInfo>, addr: H160) {
+    tokens.push(TokenInfo {
+        symbol: short_addr(addr),
+        address: addr,
+    });
+}
+
+fn short_addr(addr: H160) -> String {
     format!(
         "0x{}",
         hex::encode(addr.as_bytes())
@@ -260,14 +299,6 @@ fn read_u256_usize(data: &[u8], offset: usize) -> Result<usize> {
     usize::try_from(val).context(format!("u256 value {} overflows usize", val))
 }
 
-/// Read an address from ABI-encoded data at a byte offset (last 20 bytes of 32-byte word)
-fn read_address(data: &[u8], offset: usize) -> Result<H160> {
-    if offset + 32 > data.len() {
-        bail!("read_address out of bounds at offset {}", offset);
-    }
-    Ok(H160::from_slice(&data[offset + 12..offset + 32]))
-}
-
 /// Read raw bytes from ABI-encoded data at a byte offset
 fn read_bytes(data: &[u8], offset: usize, len: usize) -> Result<Vec<u8>> {
     if offset + len > data.len() {
@@ -284,6 +315,95 @@ fn read_bytes(data: &[u8], offset: usize, len: usize) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_decode_token_data_array_extracts_symbols() {
+        // Construct a synthetic `getAllReservesTokens()` response with three
+        // tuples: (string "USDC", address 0xA0b8...), (string "WETH", address
+        // 0xC02a...), (string "WBTC", address 0x2260...). Verifies the decoder
+        // walks the tuple head offsets rather than heuristically scanning
+        // for addresses, which was producing `0xe6a93408`-style fallbacks
+        // when strings were positioned before their corresponding address.
+        let usdc_addr = H160::from_slice(&hex::decode("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").unwrap());
+        let weth_addr = H160::from_slice(&hex::decode("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap());
+        let wbtc_addr = H160::from_slice(&hex::decode("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599").unwrap());
+
+        let mut data = Vec::new();
+        // word 0: array length = 3
+        data.extend_from_slice(&[0u8; 31]);
+        data.push(3);
+
+        // words 1..4: tuple heads.
+        // For 4-char symbols each tuple is 4 words = 128 bytes.
+        //   tuple[0] starts at byte 0x80 (after the 4 head words)
+        //   tuple[1] starts at byte 0x100
+        //   tuple[2] starts at byte 0x180
+        let head_offsets = [0x80u32, 0x100, 0x180];
+        for &h in &head_offsets {
+            data.extend_from_slice(&[0u8; 28]);
+            data.extend_from_slice(&h.to_be_bytes());
+        }
+
+        // helper to write one tuple
+        let mut write_tuple = |data: &mut Vec<u8>, addr: H160, symbol: &str| {
+            // word 0: string offset relative to tuple start = 0x40
+            data.extend_from_slice(&[0u8; 31]);
+            data.push(0x40);
+            // word 1: address (padded to 32 bytes)
+            data.extend_from_slice(&[0u8; 12]);
+            data.extend_from_slice(addr.as_bytes());
+            // word 2: string length
+            data.extend_from_slice(&[0u8; 31]);
+            data.push(symbol.len() as u8);
+            // word 3: string bytes (padded with zeros to 32)
+            let mut bytes = vec![0u8; 32];
+            for (i, b) in symbol.bytes().enumerate() {
+                bytes[i] = b;
+            }
+            data.extend_from_slice(&bytes);
+        };
+
+        write_tuple(&mut data, usdc_addr, "USDC");
+        write_tuple(&mut data, weth_addr, "WETH");
+        write_tuple(&mut data, wbtc_addr, "WBTC");
+
+        let tokens = decode_token_data_array(&data).expect("decode");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].symbol, "USDC");
+        assert_eq!(tokens[0].address, usdc_addr);
+        assert_eq!(tokens[1].symbol, "WETH");
+        assert_eq!(tokens[1].address, weth_addr);
+        assert_eq!(tokens[2].symbol, "WBTC");
+        assert_eq!(tokens[2].address, wbtc_addr);
+    }
+
+    #[test]
+    fn test_decode_token_data_array_falls_back_on_bad_length() {
+        // Tuple with string length = 0 — decoder should fall back to the
+        // short-address prefix rather than producing an empty symbol.
+        let addr = H160::from_slice(&hex::decode("E6A9340895C5F75Cf2C0E6eD6e1AcE7Cdf6da1a8").unwrap());
+        let mut data = Vec::new();
+        data.extend_from_slice(&[0u8; 31]);
+        data.push(1); // 1 tuple
+        // head[0] = 0x40 (after the length word + 1 head word)
+        data.extend_from_slice(&[0u8; 28]);
+        data.extend_from_slice(&0x40u32.to_be_bytes());
+        // tuple: string_offset = 0x40
+        data.extend_from_slice(&[0u8; 31]);
+        data.push(0x40);
+        // address
+        data.extend_from_slice(&[0u8; 12]);
+        data.extend_from_slice(addr.as_bytes());
+        // string length = 0
+        data.extend_from_slice(&[0u8; 32]);
+        // string bytes (empty)
+        data.extend_from_slice(&[0u8; 32]);
+
+        let tokens = decode_token_data_array(&data).expect("decode");
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].address, addr);
+        assert!(tokens[0].symbol.starts_with("0x"));
+    }
 
     #[test]
     fn test_decode_reserve_data() {

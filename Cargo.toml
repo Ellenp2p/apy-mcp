@@ -4,10 +4,15 @@ version = "0.1.0"
 edition = "2021"
 description = "MCP server for DeFi lending rate aggregation across multiple chains"
 
+[features]
+default = ["mcp", "web"]
+mcp = ["rmcp", "rmcp-macros", "schemars"]
+web = ["rust-embed", "dioxus"]
+
 [dependencies]
 # MCP server (latest version with server_handler support)
-rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server", "server-side-http", "tower", "auth"] }
-rmcp-macros = "1.7"
+rmcp = { version = "1.7", features = ["server", "transport-io", "transport-streamable-http-server", "server-side-http", "tower", "auth"], optional = true }
+rmcp-macros = { version = "1.7", optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -38,7 +43,7 @@ base64 = "0.22"
 stellar-xdr = { version = "22", features = ["std"] }
 
 # JSON Schema generation for MCP tool parameters
-schemars = "0.8"
+schemars = { version = "1", optional = true }
 
 # Error handling
 anyhow = "1"
@@ -79,3 +84,12 @@ urlencoding = "2"
 
 # URL parsing
 url = "2"
+
+# Query-string deserialization for axum Query extractor (and tests)
+serde_urlencoded = "0.7"
+
+# Embed static frontend assets into the binary
+rust-embed = { version = "8", optional = true }
+
+# SSR frontend (web feature only)
+dioxus = { version = "0.6", features = ["ssr"], optional = true }

@@ -11,7 +11,7 @@ use primitive_types::H160;
 use tracing::info;
 
 use crate::chains::LendingProvider;
-use crate::mcp::types::{AssetRate, PoolRates};
+use crate::service::types::{AssetRate, PoolRates};
 
 use self::rpc::RpcManager;
 

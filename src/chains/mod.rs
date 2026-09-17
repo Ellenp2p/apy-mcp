@@ -5,7 +5,7 @@ pub mod stellar;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::mcp::types::PoolRates;
+use crate::service::types::PoolRates;
 
 /// Trait for chain-specific lending protocol providers
 #[async_trait]

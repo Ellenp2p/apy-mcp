@@ -1,12 +1,38 @@
 # apy-mcp
 
-MCP (Model Context Protocol) server for DeFi lending rate aggregation across multiple blockchains.
+Server for DeFi lending rate aggregation across multiple blockchains. One binary
+serves three surfaces:
 
-Currently supported:
+- **Web UI** (`/`) — embedded static frontend (query page, GitHub login)
+- **Web API** (`/api/v1/*`) — REST access to the same query core (Bearer auth)
+- **MCP** (`/mcp`) — Model Context Protocol `query_rates` tool (optional, see below)
+
+Currently supported protocols:
 - **Stellar** — Blend Capital lending pools
 - **EVM** — Aave V3 and Spark Savings (spUSDC/spUSDT vaults)
 
 > 技术复盘：OAuth 接入踩坑与最终实现见 [docs/oauth-retrospective.md](docs/oauth-retrospective.md)
+
+## Cargo Features
+
+| Feature | Default | What it enables |
+|---------|---------|-----------------|
+| `mcp`   | yes     | MCP tool, `/mcp` endpoint, `stdio` subcommand |
+| `web`   | yes     | Embedded frontend (`web/` via rust-embed) |
+
+```bash
+cargo build --release                                    # full build
+cargo build --release --no-default-features              # REST API only, no /mcp, no web UI
+cargo build --release --no-default-features --features web
+```
+
+With `mcp` built in, the endpoint can still be switched off at runtime:
+
+```bash
+./apy-mcp http --enable-mcp=false    # or ENABLE_MCP=false; GET /mcp -> 404 mcp_disabled
+```
+
+Without the `mcp` feature, `GET /mcp` returns `404 mcp_not_available`.
 
 ## Features
 
@@ -138,8 +164,13 @@ ALCHEMY_KEY=your_key cargo run -- http ...   # or --evm-provider-key your_key
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
+| `/` | GET | No | Web UI (query page) |
 | `/health` | GET | No | Health check |
-| `/mcp` | POST | API Key / OAuth | MCP Streamable HTTP endpoint |
+| `/api/v1/rates` | GET | No | Query rates (`chain`, `asset`, `protocol`, `min/max_supply_apy`, `min/max_borrow_apy`, `min/max_utilization`, `use_cache`) |
+| `/api/v1/chains` | GET | No | Supported chains |
+| `/api/v1/protocols` | GET | No | Supported protocols |
+| `/api/v1/pools` | GET | No | Monitored Blend pools |
+| `/mcp` | POST | API Key / OAuth / GitHub token | MCP Streamable HTTP endpoint (needs `mcp` feature) |
 | `/auth/github` | GET | No | Start GitHub OAuth flow |
 | `/auth/github/callback` | GET | No | GitHub OAuth callback |
 | `/auth/user` | GET | OAuth Token | Get current user info |
@@ -178,8 +209,8 @@ http://localhost:3000/auth/github    → GitHub 登录
 Control **who** can log in / use the service by GitHub **username** or **UID**.
 Enforced at two levels:
 1. **Login** — OAuth callback denies users not in the allowlist.
-2. **Requests** — `/mcp` access with a GitHub/OAuth token is denied (403) if the user
-   is not in the allowlist.
+2. **Requests** — `/mcp` access with a GitHub/OAuth token is denied (403) if the
+   user is not in the allowlist. (`/api/v1/*` is public and unaffected.)
 
 > When the allowlist is **empty**, all GitHub users are allowed (open mode).
 > For production you SHOULD populate it.
@@ -258,6 +289,25 @@ cargo run -- admin deactivate --key-id <key-id>
 cargo run -- admin delete --key-id <key-id>
 ```
 
+## Web UI & REST API
+
+Open `/` in a browser — rate data is public: the page is server-side rendered
+and the filter form re-renders it with fresh results. No login needed; GitHub
+login is only for `/mcp` (and admin/management).
+
+```bash
+# Same query over the public REST API (cached 120s server-side):
+curl "http://localhost:3000/api/v1/rates?chain=ethereum&asset=USDC&min_supply_apy=0.03"
+```
+
+Response shape: `{ "pools": [PoolRates], "fetched_at": "..." }` — identical data
+to the MCP `query_rates` tool (one shared `RateService` core, 120s SQLite cache).
+
+The frontend is **Dioxus SSR** (`web` feature): the `/` page is rendered
+server-side on every request — the filter form submits GET back to `/` and the
+results table comes back in the HTML. `web/` only holds `style.css` and a tiny
+`app.js` (OAuth token capture); no JS framework on the client, no build step.
+
 ## Custom Headers (X-Poke-User-Id)
 
 The server supports custom headers that are logged with each request:
@@ -287,12 +337,9 @@ Headers starting with `X-Poke-*` or `X-Custom-*` are automatically captured and 
 
 | Tool | Description |
 |------|-------------|
-| `get_blend_rates` | Query lending/borrowing rates for a Blend Capital pool |
-| `get_all_rates` | Get rates for all monitored pools |
-| `add_pool` | Add a pool to the monitoring list |
+| `query_rates` | Query lending/borrowing rates with filters (`chain`, `asset`, `protocol`, `min/max_supply_apy`, `min/max_borrow_apy`, `min/max_utilization`); actions `query` (default) / `add` / `list` |
 
-> Current production tool: `query_rates` with `protocol` filter
-> (`aave_v3` | `spark` (Spark Savings) | `blend` | `all`).
+> `protocol` filter: `aave_v3` | `spark` (Spark Savings) | `blend` | `all`.
 > Spark Savings rates come from the official Spark Savings Data API
 > (`api.spark.fi/v1/savings/{protocol}/{chain}/{token}`).
 

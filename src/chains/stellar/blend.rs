@@ -6,7 +6,7 @@ use tracing::info;
 
 use super::interest::{self, ReserveConfig, ReserveData};
 use super::rpc::SorobanRpc;
-use crate::mcp::types::{AssetRate, PoolRates};
+use crate::service::types::{AssetRate, PoolRates};
 
 /// Fetch pool rates from a Blend Capital lending pool on Stellar.
 ///

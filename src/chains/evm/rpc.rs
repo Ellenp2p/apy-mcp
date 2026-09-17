@@ -194,7 +194,14 @@ impl RpcManager {
     pub async fn set_default_provider(&self, provider_name: &str, api_key: Option<String>) {
         let mut dp = self.default_provider.write().await;
         *dp = Some((provider_name.to_string(), api_key));
-        tracing::info!(provider = provider_name, "Set global default EVM provider");
+        let has_key = dp.as_ref().map(|(_, k)| k.is_some()).unwrap_or(false);
+        tracing::info!(provider = provider_name, has_key = has_key, "Set global default EVM provider");
+        if !has_key {
+            tracing::warn!(
+                provider = provider_name,
+                "No API key configured for the default EVM provider — public RPC fallbacks will be used (slow, rate-limited). Set ALCHEMY_KEY / EVM_PROVIDER_KEY or --evm-provider-key."
+            );
+        }
     }
 
     /// Set provider for a specific chain (overrides global default)
@@ -427,6 +434,7 @@ impl RpcManager {
             .http_client
             .post(&config.rpc_url)
             .json(&request)
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
             .context("Failed to send RPC request")?

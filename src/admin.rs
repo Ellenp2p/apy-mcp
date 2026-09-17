@@ -339,8 +339,7 @@ pub async fn list_rpc_providers(
 
     // Also include current config
     let default_provider = _state
-        .tools
-        .state
+        .service
         .aave_provider
         .get_rpc_manager()
         .get_default_provider()
@@ -360,7 +359,7 @@ pub async fn get_rpc_status(
     validate_admin_token(&headers, &state.admin_token)?;
 
     // Get the RPC manager from AaveProvider
-    let rpc = state.tools.state.aave_provider.get_rpc_manager();
+    let rpc = state.service.aave_provider.get_rpc_manager();
     let statuses = rpc.check_all_chains_health().await;
 
     Ok(axum::Json(serde_json::json!({

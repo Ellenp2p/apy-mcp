@@ -1,0 +1,459 @@
+/* ── Design tokens ─────────────────────────────────────── */
+:root {
+    --bg: #07080e;
+    --bg-soft: #0e1019;
+    --card: rgba(255, 255, 255, 0.032);
+    --card-border: rgba(255, 255, 255, 0.075);
+    --text: #eef0f8;
+    --muted: #9aa2b8;
+    --faint: #5f6780;
+    --accent: #8b7cff;
+    --accent-2: #4cc2ff;
+    --green: #3ddc97;
+    --red: #ff7a7a;
+    --radius: 18px;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 16px; }
+
+body {
+    font-family: "Inter", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 15.5px;
+    line-height: 1.65;
+    background:
+        radial-gradient(1100px 560px at 82% -12%, rgba(139, 124, 255, 0.16), transparent 62%),
+        radial-gradient(850px 480px at -8% 16%, rgba(76, 194, 255, 0.10), transparent 58%),
+        radial-gradient(700px 500px at 50% 115%, rgba(61, 220, 151, 0.05), transparent 60%),
+        var(--bg);
+    color: var(--text);
+    margin: 0;
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+}
+
+/* ── Topbar ────────────────────────────────────────────── */
+.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 32px;
+    background: rgba(7, 8, 14, 0.78);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--card-border);
+}
+.brand {
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: 0.3px;
+    background: linear-gradient(90deg, #fff 35%, var(--accent) 90%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.brand span { -webkit-text-fill-color: var(--accent); }
+.auth-area { display: flex; align-items: center; gap: 14px; font-size: 15px; }
+.auth-area .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    padding: 10px 22px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff;
+    text-decoration: none;
+    border: none;
+    font-size: 14.5px;
+    font-weight: 650;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    box-shadow: 0 4px 18px rgba(139, 124, 255, 0.35);
+}
+.auth-area .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 26px rgba(139, 124, 255, 0.5); }
+.auth-area .btn:active { transform: translateY(0); }
+.auth-area .user { color: var(--muted); }
+
+.container { max-width: 1180px; margin: 0 auto; padding: 0 32px; }
+
+/* ── Hero ──────────────────────────────────────────────── */
+.hero { padding: 52px 0 10px; }
+.hero h1 {
+    margin: 0 0 14px;
+    font-size: clamp(27px, 4vw, 40px);
+    font-weight: 800;
+    line-height: 1.2;
+    letter-spacing: -0.5px;
+    background: linear-gradient(100deg, #fff 30%, #c9c2ff 75%, var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.hero p {
+    margin: 0;
+    max-width: 660px;
+    font-size: 16.5px;
+    color: var(--muted);
+}
+
+/* ── Cards ─────────────────────────────────────────────── */
+.card {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius);
+    padding: 30px 34px;
+    margin: 26px 0;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+}
+.card h2 { margin: 0 0 24px; font-size: 19px; font-weight: 750; letter-spacing: 0.2px; }
+
+/* ── Notice ────────────────────────────────────────────── */
+.notice {
+    background: rgba(61, 220, 151, 0.09);
+    border: 1px solid rgba(61, 220, 151, 0.28);
+    color: var(--green);
+    padding: 14px 20px;
+    border-radius: 12px;
+    margin: 22px 0 4px;
+    font-size: 14.5px;
+}
+.notice.error {
+    background: rgba(255, 122, 122, 0.09);
+    border-color: rgba(255, 122, 122, 0.32);
+    color: var(--red);
+}
+.hidden { display: none !important; }
+
+/* ── Status ───────────────────────────────────────────── */
+.status {
+    color: var(--muted);
+    font-size: 14.5px;
+    margin-bottom: 22px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 10px rgba(61, 220, 151, 0.7);
+    margin-right: 10px;
+    flex: none;
+}
+.status-num {
+    color: var(--text);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    padding: 0 3px;
+}
+.status-time {
+    margin-left: 8px;
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+}
+.cache-pill {
+    margin-left: 10px;
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--card-border);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+}
+.status.err { color: var(--red); }
+.status.err .status-dot { background: var(--red); box-shadow: 0 0 10px rgba(255, 122, 122, 0.7); }
+
+/* ── Results tabs (protocol → chain) ───────────────────── */
+/* Without JS the `tabs-on` class is absent: tab bars hide, all panels show. */
+.results .tabs, .results .subtabs { display: none; }
+.results.tabs-on .tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 24px;
+}
+.results.tabs-on .tab-panel { display: none; }
+.results.tabs-on .tab-panel.active { display: block; }
+.results.tabs-on .subtabs {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 0 0 18px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--card-border);
+}
+.tab, .subtab {
+    background: var(--bg-soft);
+    border: 1px solid var(--card-border);
+    color: var(--muted);
+    border-radius: 999px;
+    padding: 9px 20px;
+    font-size: 14.5px;
+    font-weight: 650;
+    font-family: inherit;
+    cursor: pointer;
+    transition: color 0.12s ease, background 0.12s ease, border-color 0.12s ease;
+}
+.tab:hover, .subtab:hover { color: var(--text); border-color: rgba(255, 255, 255, 0.18); }
+.tab.active {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    border-color: transparent;
+    color: #fff;
+    box-shadow: 0 4px 16px rgba(139, 124, 255, 0.35);
+}
+.subtab { padding: 7px 16px; font-size: 13.5px; text-transform: lowercase; }
+.subtab.active {
+    color: var(--text);
+    border-color: var(--accent);
+    background: rgba(139, 124, 255, 0.14);
+}
+
+.results.tabs-on .subpanel { display: none; }
+.results.tabs-on .subpanel.active { display: block; }
+
+.pool-sub {
+    margin: 20px 0 10px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--muted);
+}
+.pool-sub:first-child { margin-top: 0; }
+
+/* ── Table ─────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; font-size: 15px; }
+th, td {
+    text-align: left;
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--card-border);
+}
+th.col-num, td.num { text-align: right; }
+th {
+    color: var(--faint);
+    font-weight: 700;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.9px;
+    padding-top: 8px;
+}
+th.sorted { color: var(--text); }
+th .sort-link {
+    color: inherit;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+th .sort-link:hover { color: var(--text); }
+th.col-num .sort-link { justify-content: flex-end; width: 100%; }
+th .sort-link.active { color: var(--accent); }
+th .sort-ind {
+    display: inline-block;
+    min-width: 10px;
+    font-size: 11px;
+    color: var(--accent);
+    line-height: 1;
+    text-align: left;
+}
+/* When the indicator isn't rendered (inactive column), the span is absent
+   entirely — table-layout: auto would reflow columns when ↑/↓ appears on a
+   different header, shifting rows by 1-2px. The DOM is identical to the
+   previous render for an inactive column. */
+
+/* ── htmx partial refresh (no full reload) ─────────────── */
+/* Sort-header clicks run cache_only (~2ms) — silent, no indicator, so the
+   swap looks instant and there's no flash from a half-applied opacity
+   transition. The filter form submits use hx-indicator="#results-region",
+   so the only in-flight feedback is a small spinner on the status dot
+   while the form is genuinely waiting on the network. */
+.htmx-request .status-dot {
+    position: relative;
+}
+.htmx-request .status-dot::after {
+    content: "";
+    position: absolute;
+    inset: -3px;
+    border: 2px solid transparent;
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: htmx-spin 0.8s linear infinite;
+}
+@keyframes htmx-spin { to { transform: rotate(360deg); } }
+
+tbody tr { transition: background 0.12s ease; }
+tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
+tbody tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; color: var(--muted); font-size: 15.5px; }
+td.num.pos { color: var(--green); font-weight: 700; }
+td.num.neg { color: #ff9c9c; }
+td.asset-cell { font-weight: 650; }
+
+/* ── Utilization gauge ─────────────────────────────────── */
+.util { display: flex; align-items: center; gap: 12px; min-width: 170px; }
+.gauge {
+    flex: 1;
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.07);
+    overflow: hidden;
+}
+.gauge-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #2dd4bf, var(--green));
+    transition: width 0.4s ease;
+}
+.gauge-fill.lvl-mid { background: linear-gradient(90deg, #fbbf24, #f59e0b); }
+.gauge-fill.lvl-high { background: linear-gradient(90deg, #fb923c, #ef4444); }
+.util-num {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    font-size: 13.5px;
+    color: var(--muted);
+    min-width: 48px;
+    text-align: right;
+}
+
+/* ── Hover tooltip (总供应 / 总借出) ───────────────────── */
+.tip { position: relative; }
+.tip .tip-box {
+    display: none;
+    position: absolute;
+    left: 0;
+    top: calc(100% + 10px);
+    z-index: 20;
+    background: #141726;
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 12px 16px;
+    min-width: 170px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+    font-size: 13.5px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+.tip .tip-box::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    left: 20px;
+    width: 10px;
+    height: 10px;
+    background: #141726;
+    border-left: 1px solid var(--card-border);
+    border-top: 1px solid var(--card-border);
+    transform: rotate(45deg);
+}
+.tip .tip-row { display: flex; justify-content: space-between; gap: 18px; color: var(--muted); line-height: 1.9; }
+.tip .tip-row b { color: var(--text); font-variant-numeric: tabular-nums; }
+.tip:hover .tip-box { display: block; }
+tr:hover .tip .tip-box { display: block; }
+
+/* ── Footer ────────────────────────────────────────────── */
+.footer {
+    color: var(--faint);
+    font-size: 14px;
+    text-align: center;
+    padding: 30px 0 48px;
+}
+.footer a { color: var(--accent); text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
+.footer code {
+    background: var(--bg-soft);
+    border: 1px solid var(--card-border);
+    padding: 3px 9px;
+    border-radius: 7px;
+    font-size: 13px;
+}
+
+/* ── Docs page ─────────────────────────────────────────── */
+.topnav { display: flex; gap: 4px; margin-left: 26px; margin-right: auto; }
+.topnav a {
+    color: var(--muted);
+    text-decoration: none;
+    padding: 9px 16px;
+    border-radius: 10px;
+    font-size: 14.5px;
+    font-weight: 600;
+    transition: color 0.12s ease, background 0.12s ease;
+}
+.topnav a:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+
+.pill {
+    display: inline-block;
+    padding: 5px 13px;
+    border-radius: 999px;
+    font-size: 12.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    background: rgba(139, 124, 255, 0.14);
+    color: #c5bcff;
+    border: 1px solid rgba(139, 124, 255, 0.32);
+}
+.pill.ok { background: rgba(61, 220, 151, 0.13); color: #6fe7b6; border-color: rgba(61, 220, 151, 0.35); }
+.pill.off { background: rgba(255, 122, 122, 0.11); color: #ff9c9c; border-color: rgba(255, 122, 122, 0.3); }
+
+.doc h3 {
+    margin: 26px 0 12px;
+    font-size: 16.5px;
+    font-weight: 700;
+    color: var(--text);
+}
+.doc h3:first-of-type { margin-top: 4px; }
+.doc p { color: var(--muted); margin: 12px 0; font-size: 15px; }
+.doc a { color: var(--accent); text-decoration: none; }
+.doc a:hover { text-decoration: underline; }
+.doc ol { color: var(--muted); padding-left: 24px; margin: 12px 0; font-size: 15px; }
+.doc li { margin: 8px 0; }
+.doc p code, .doc li code, .doc .endpoint code {
+    background: var(--bg-soft);
+    border: 1px solid var(--card-border);
+    padding: 3px 9px;
+    border-radius: 7px;
+    font-size: 13.5px;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    color: #cdd3e8;
+    word-break: break-all;
+}
+.doc pre {
+    background: #0a0c13;
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    margin: 14px 0;
+}
+.doc pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: #c8cfe6;
+    word-break: normal;
+}
+.doc .endpoint { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.doc .endpoint code { font-size: 15px; }
+
+/* ── Responsive ────────────────────────────────────────── */
+@media (max-width: 640px) {
+    .topbar { padding: 14px 18px; flex-wrap: wrap; gap: 10px; }
+    .topnav { order: 3; margin-left: 0; width: 100%; }
+    .container { padding: 0 18px; }
+    .hero { padding: 34px 0 4px; }
+    .card { padding: 20px; }
+    th, td { padding: 11px 12px; }
+}

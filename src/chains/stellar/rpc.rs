@@ -66,6 +66,7 @@ impl SorobanRpc {
             .client
             .post(&self.rpc_url)
             .json(&body)
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await
             .context("Failed to send RPC request")?;
