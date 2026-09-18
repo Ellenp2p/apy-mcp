@@ -62,6 +62,10 @@ pub struct HttpState {
     pub admin_token: Option<String>,
     pub base_url: String,
     pub rate_limiters: Arc<tokio::sync::RwLock<std::collections::HashMap<String, RateLimiter>>>,
+    /// On-disk cache for protocol / chain / token icons. See `crate::icons`.
+    pub icons: crate::icons::IconCache,
+    /// Shared HTTP client for the icon cache's upstream fetches.
+    pub http_client: reqwest::Client,
 }
 
 /// Extract custom headers from the request
@@ -1200,6 +1204,14 @@ pub async fn start_http_server(
         admin_token: admin_token.clone(),
         base_url: base_url.clone(),
         rate_limiters: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        // Icons live next to the SQLite DB so a single `data/` directory
+        // holds all runtime cache; both are gitignored.
+        icons: crate::icons::IconCache::new(std::path::PathBuf::from("data/icons")),
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .user_agent("apy-mcp-icon-proxy/1.0")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()),
     };
 
     // Warm the rate cache in the background so the first page/API hit is fast.
@@ -1309,6 +1321,14 @@ pub async fn start_http_server(
         .route("/api/v1/protocols", get(crate::api::get_protocols))
         .route("/api/v1/pools", get(crate::api::get_pools));
 
+    // Public icon proxy: GET /icon/{category}/{name}. The browser hits our
+    // own server (no CORS, no third-party cookies); the server pulls from
+    // Trust Wallet / 1inch on first request and caches to `data/icons/`.
+    // `symbol` is a special category for address-less fallback (e.g.
+    // /icon/symbol/USDC.png → canonical USDC logo).
+    let icon_routes = Router::new()
+        .route("/icon/{category}/{name}", get(crate::icons::icon_handler));
+
     // Build MCP routes. Three cases:
     // - built without the "mcp" feature  -> 404 "not compiled in"
     // - --enable-mcp=false               -> 404 "disabled on this server"
@@ -1370,6 +1390,7 @@ pub async fn start_http_server(
     let app = Router::new()
         .merge(public_routes)
         .merge(api_routes)
+        .merge(icon_routes)
         .merge(mcp_routes)
         .merge(oauth_routes)
         .merge(oauth_callback_routes)
@@ -1382,6 +1403,7 @@ pub async fn start_http_server(
     let app = Router::new()
         .merge(public_routes)
         .merge(api_routes)
+        .merge(icon_routes)
         .merge(mcp_routes)
         .merge(oauth_routes)
         .merge(oauth_callback_routes)

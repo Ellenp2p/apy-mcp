@@ -22,8 +22,11 @@ use crate::service::types::{AllRatesResponse, AssetRate, PoolRates, QueryRatesPa
 struct Assets;
 
 /// How long the page render may wait for a fresh query (form submit) before
-/// falling back to whatever is in the cache.
-const PAGE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// falling back to whatever is in the cache. Aave V3's per-chain RPC
+/// timeouts add up if many chains have flaky public RPCs (no ALCHEMY_KEY);
+/// 3s is enough for the healthy chains to come back, and the rest fall
+/// through to the cache via `cached_fallback`.
+const PAGE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Cache-read budget for the initial page render (SQLite only, no network).
 const CACHE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -323,12 +326,160 @@ fn Gauge(u: f64) -> Element {
     }
 }
 
+/// Build a local icon URL served by `/icon/<category>/<name>`. The route
+/// in `crate::icons` looks the file up in `data/icons/`; on miss it pulls
+/// from the upstream CDN (Trust Wallet for protocols/chains, 1inch for
+/// tokens), writes to disk, and returns the bytes. So the browser always
+/// loads icons from our own server — no CORS, no third-party cookies, and
+/// the same address (e.g. `0xa0b8...` for USDC) only gets downloaded once
+/// across all sessions.
+fn protocol_icon_url(protocol: &str) -> Option<String> {
+    Some(format!("/icon/protocol/{protocol}.png"))
+}
+fn chain_icon_url(chain: &str) -> Option<String> {
+    Some(format!("/icon/chain/{chain}.png"))
+}
+fn asset_icon_url(_chain: &str, asset_id: &str) -> Option<String> {
+    let addr = asset_id.trim_start_matches("0x").to_lowercase();
+    if addr.len() != 40 || !addr.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("/icon/token/0x{addr}.png"))
+}
+
+/// Symbol-based fallback URL — the icon proxy looks up a canonical
+/// Ethereum-mainnet logo for the ticker (USDC.e normalises to USDC, etc.).
+/// Used as a chained `onerror` fallback in the asset row when the
+/// address-based lookup 404s on bridged / alt-chain token instances.
+fn asset_symbol_icon_url(asset_name: &str) -> Option<String> {
+    // Strip non-ASCII junk (e.g. "USDC.e (Legacy)" → "USDC") and
+    // normalise so USDC.e / usdc / USDC all hit the same table entry.
+    let cleaned: String = asset_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.')
+        .collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(format!("/icon/symbol/{}.png", cleaned.to_ascii_uppercase()))
+}
+
+/// 3-letter badge for the protocol fallback chip.
+fn proto_label(p: &str) -> &'static str {
+    match p {
+        "aave_v3" => "AAV",
+        "spark" => "SPK",
+        "blend" => "BLN",
+        other => {
+            let mut out = String::with_capacity(3);
+            for (i, c) in other.chars().enumerate() {
+                if i >= 3 { break; }
+                out.push(c.to_ascii_uppercase());
+            }
+            Box::leak(out.into_boxed_str())
+        }
+    }
+}
+
+/// 3-letter badge for the chain fallback chip.
+fn chain_label(c: &str) -> &'static str {
+    match c {
+        "ethereum" => "ETH",
+        "arbitrum" => "ARB",
+        "optimism" => "OP",
+        "polygon" => "POL",
+        "avalanche" => "AVX",
+        "sonic" => "SON",
+        "gnosis" => "GNO",
+        "base" => "BAS",
+        "scroll" => "SCR",
+        "zksync" => "ZK",
+        "bnb" => "BNB",
+        "stellar" => "XLM",
+        other => {
+            let mut out = String::with_capacity(3);
+            for (i, c) in other.chars().enumerate() {
+                if i >= 3 { break; }
+                out.push(c.to_ascii_uppercase());
+            }
+            Box::leak(out.into_boxed_str())
+        }
+    }
+}
+
+/// Deterministic background color for the asset fallback chip — derived
+/// from a quick hash of the asset id so the same token always gets the
+/// same color across renders / swaps, while different tokens get
+/// distinct colors.
+fn asset_chip_color(asset_id: &str) -> String {
+    let hash = asset_id.bytes().fold(0u32, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(b as u32)
+    });
+    let hue = hash % 360;
+    format!("hsl({hue}, 62%, 52%)")
+}
+
+/// First printable ASCII character of the asset name, used as the asset
+/// fallback chip letter. Falls back to '?' for empty / non-ASCII names.
+fn asset_chip_letter(name: &str) -> char {
+    name.chars()
+        .find(|c| c.is_ascii_graphic())
+        .map(|c| c.to_ascii_uppercase())
+        .unwrap_or('?')
+}
+
 #[component]
-fn AssetRow(a: AssetRate) -> Element {
+fn AssetRow(a: AssetRate, pool_protocol: String, pool_chain: String) -> Element {
+    let proto_url = protocol_icon_url(&pool_protocol);
+    let chain_url = chain_icon_url(&pool_chain);
+    let asset_url = asset_icon_url(&pool_chain, &a.asset_id);
+    let asset_sym_url = asset_symbol_icon_url(&a.asset_name);
+    let proto_fb = proto_label(&pool_protocol);
+    let chain_fb = chain_label(&pool_chain);
+    let asset_bg = asset_chip_color(&a.asset_id);
+    let asset_letter = asset_chip_letter(&a.asset_name);
     rsx! {
         tr {
             td { class: "asset-cell",
-                span { class: "tip",
+                div { class: "asset-icons",
+                    span { class: "ic proto-ic",
+                        if let Some(u) = proto_url {
+                            img { class: "ic-img", src: "{u}", loading: "lazy", alt: "{pool_protocol}",
+                                  "onerror": "this.style.display='none'; this.nextElementSibling.style.display='inline-flex'" }
+                        }
+                        span { class: "ic-fb proto-fb", "data-proto": "{pool_protocol}",
+                               title: "{pool_protocol}", "{proto_fb}" }
+                    }
+                    span { class: "ic chain-ic",
+                        if let Some(u) = chain_url {
+                            img { class: "ic-img", src: "{u}", loading: "lazy", alt: "{pool_chain}",
+                                  "onerror": "this.style.display='none'; this.nextElementSibling.style.display='inline-flex'" }
+                        }
+                        span { class: "ic-fb chain-fb", "data-chain": "{pool_chain}",
+                               title: "{pool_chain}", "{chain_fb}" }
+                    }
+                    span { class: "ic asset-ic",
+                        // Chained fallback: address-based first, then
+                        // symbol-based (canonical USDC/WETH/etc. logos
+                        // from Trust Wallet Ethereum), then colored letter.
+                        // The second <img> starts display:none and only
+                        // shows up if the first one's onerror fires.
+                        if let Some(u) = asset_url {
+                            img { class: "ic-img", src: "{u}", loading: "lazy", alt: "{a.asset_name}",
+                                  "onerror": "this.style.display='none'; this.parentElement.querySelector('.ic-img-symbol').style.display='block';" }
+                        }
+                        if let Some(u) = asset_sym_url {
+                            img { class: "ic-img ic-img-symbol", src: "{u}", loading: "lazy", alt: "{a.asset_name}",
+                                  style: "display:none",
+                                  "onerror": "this.style.display='none'; this.nextElementSibling.style.display='inline-flex';" }
+                        }
+                        span { class: "ic-fb asset-fb",
+                               style: "background: {asset_bg}",
+                               title: "{a.asset_name}",
+                               "{asset_letter}" }
+                    }
+                }
+                span { class: "asset-name tip",
                     "{a.asset_name}"
                     span { class: "tip-box",
                         span { class: "tip-row", "总供应 ", b { "{fmt_num(a.total_supplied)}" } }
@@ -372,6 +523,7 @@ fn SortHeader(
                 "hx-get": "{href}",
                 "hx-target": "#results-region",
                 "hx-swap": "outerHTML",
+                "hx-indicator": "#results-region",
                 "hx-scroll": "false",
                 "hx-push-url": "true",
                 "{label}"
@@ -411,7 +563,11 @@ fn PoolTable(
             }
             tbody {
                 for a in pool.assets.clone() {
-                    AssetRow { a: a }
+                    AssetRow {
+                        a: a,
+                        pool_protocol: pool.protocol.clone(),
+                        pool_chain: pool.chain.clone(),
+                    }
                 }
             }
         }
@@ -735,8 +891,9 @@ pub async fn index_handler(
     // Cache policy:
     //   * Initial visit (`/` with no params) — never block on the network.
     //   * htmx sort-header click — pure re-order, just re-render the cache.
-    //   * Form submit (`force_refresh=1`) — run the real query, bounded, with
-    //     a cached fallback.
+    //   * Form submit (`force_refresh=1`) — return cached data instantly
+    //     and kick a background refresh; user sees data immediately, the
+    //     next page load gets fresh data once the background task lands.
     let cache_only = is_initial || !force_refresh;
     filters.cache_only = cache_only;
 
@@ -744,16 +901,30 @@ pub async fn index_handler(
         initial_page_data(&state).await
     } else if cache_only {
         cached_fallback(&state, filters.clone(), None).await
+    } else if let Some(cached) = cached_data_snapshot(&state).await {
+        // force_refresh=1: serve cached instantly, refresh in background.
+        let svc = state.service.clone();
+        let bg_filters = filters.clone();
+        tokio::spawn(async move {
+            let mut f = bg_filters;
+            f.cache_only = false;
+            if let Err(e) = svc.query(&f).await {
+                tracing::warn!(error = %e, "background rate refresh failed");
+            }
+        });
+        (cached, Some("后台刷新中…".to_string()), true)
     } else {
+        // Cache cold AND force_refresh: have to wait. Bounded timeout,
+        // fall back to whatever the timeout returns (empty if both fail).
         let queried = tokio::time::timeout(PAGE_QUERY_TIMEOUT, state.service.query(&filters)).await;
         match queried {
             Ok(Ok(resp)) => (resp, None, false),
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, "page query failed, falling back to cache");
+                tracing::warn!(error = %e, "page query failed");
                 cached_fallback(&state, filters.clone(), Some(format!("查询失败:{e}"))).await
             }
             Err(_) => {
-                tracing::warn!("page query timed out, falling back to cache");
+                tracing::warn!("page query timed out");
                 cached_fallback(&state, filters.clone(), Some("查询超时,已显示缓存数据".to_string())).await
             }
         }
@@ -881,6 +1052,32 @@ async fn cached_fallback(
             notice,
             true,
         ),
+    }
+}
+
+/// Quick read of the unfiltered cache snapshot — used by force_refresh=1
+/// to serve cached data instantly while a background refresh runs. Returns
+/// None if the cache is cold (caller should fall through to the real
+/// query path with the 3s timeout).
+async fn cached_data_snapshot(state: &HttpState) -> Option<AllRatesResponse> {
+    let filters = QueryRatesParams {
+        action: "query".to_string(),
+        chain: None,
+        asset: None,
+        protocol: None,
+        pool_id: None,
+        min_supply_apy: None,
+        max_supply_apy: None,
+        min_borrow_apy: None,
+        max_borrow_apy: None,
+        min_utilization: None,
+        max_utilization: None,
+        use_cache: true,
+        cache_only: true,
+    };
+    match tokio::time::timeout(CACHE_READ_TIMEOUT, state.service.query(&filters)).await {
+        Ok(Ok(resp)) if !resp.pools.is_empty() => Some(resp),
+        _ => None,
     }
 }
 

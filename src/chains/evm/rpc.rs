@@ -315,7 +315,7 @@ impl RpcManager {
             .http_client
             .post(&config.rpc_url)
             .json(&request)
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(3))
             .send()
             .await;
 
@@ -434,7 +434,7 @@ impl RpcManager {
             .http_client
             .post(&config.rpc_url)
             .json(&request)
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(4))
             .send()
             .await
             .context("Failed to send RPC request")?

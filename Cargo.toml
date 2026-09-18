@@ -78,6 +78,11 @@ governor = "0.8"
 # Password hashing for admin tokens
 sha2 = "0.10"
 hex = "0.4"
+# Keccak-256 for EIP-55 address checksumming (Trust Wallet stores token
+# logos under the checksummed path, not the lowercase path we get from
+# ABI decoding — so the icon proxy checksum-cases the address before
+# hitting Trust Wallet).
+sha3 = "0.10"
 
 # URL encoding
 urlencoding = "2"

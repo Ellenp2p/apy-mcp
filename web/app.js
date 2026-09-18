@@ -42,6 +42,13 @@
  * (data-chain) inside each panel. Without JS the `tabs-on` class is never
  * added and all panels stay visible, stacked.
  *
+ * Toggle semantics: nothing selected by default (no `.has-selection` on
+ * `.results`, all panels visible). Click a tab to filter down to that
+ * protocol's pools; click the same tab again to clear the selection and
+ * show everything again. Chain subtabs work the same way within their
+ * parent protocol panel. Subtab clicks also activate their parent
+ * protocol tab if it isn't already active.
+ *
  * htmx swaps the `#results-region` fragment in place on every sort/filter
  * click, so we expose `initResultsTabs()` and re-run it after each swap via
  * the `htmx:afterSwap` event — otherwise the freshly injected `.results`
@@ -56,31 +63,68 @@
         if (!tabs.length) return;
         var panels = Array.prototype.slice.call(root.querySelectorAll(":scope > .tab-panel"));
 
-        function activateSub(panel) {
-            var subs = panel.querySelectorAll(":scope > .subtabs > .subtab");
-            var subpanels = panel.querySelectorAll(":scope > .subpanel");
-            Array.prototype.forEach.call(subs, function (t, i) {
-                t.classList.toggle("active", i === 0);
-            });
-            Array.prototype.forEach.call(subpanels, function (p, i) {
-                p.classList.toggle("active", i === 0);
-            });
+        function clearAllActive() {
+            Array.prototype.forEach.call(
+                root.querySelectorAll(".tab.active, .subtab.active, .tab-panel.active, .subpanel.active"),
+                function (el) { el.classList.remove("active"); }
+            );
+            root.classList.remove("has-selection");
         }
 
-        function activate(name) {
-            tabs.forEach(function (t) {
-                t.classList.toggle("active", t.getAttribute("data-tab") === name);
-            });
-            panels.forEach(function (p) {
-                var on = p.getAttribute("data-panel") === name;
-                p.classList.toggle("active", on);
-                if (on) activateSub(p);
-            });
+        function activateTab(tabName) {
+            var tab = tabs.filter(function (t) { return t.getAttribute("data-tab") === tabName; })[0];
+            var panel = panels.filter(function (p) { return p.getAttribute("data-panel") === tabName; })[0];
+            if (!tab || !panel) return;
+            var wasActive = tab.classList.contains("active");
+            clearAllActive();
+            if (!wasActive) {
+                tab.classList.add("active");
+                panel.classList.add("active");
+                // No first-chain auto-select: the user can pick a chain or
+                // see all chains for this protocol. CSS only hides non-active
+                // subpanels when `.has-selection` is set, but subtab clicks
+                // also add it, so this works either way.
+                root.classList.add("has-selection");
+            }
+        }
+
+        function activateSubtab(chain, panel) {
+            var subs = Array.prototype.slice.call(panel.querySelectorAll(":scope > .subtabs > .subtab"));
+            var subpanels = Array.prototype.slice.call(panel.querySelectorAll(":scope > .subpanel"));
+            var sub = subs.filter(function (s) { return s.getAttribute("data-chain") === chain; })[0];
+            var subpanel = subpanels.filter(function (p) { return p.getAttribute("data-chain") === chain; })[0];
+            if (!sub || !subpanel) return;
+            var wasActive = sub.classList.contains("active");
+
+            // Ensure the parent protocol tab/panel is active (independent dim).
+            var tabName = panel.getAttribute("data-panel");
+            var parentTab = tabs.filter(function (t) { return t.getAttribute("data-tab") === tabName; })[0];
+            if (parentTab && !parentTab.classList.contains("active")) {
+                tabs.forEach(function (t) {
+                    t.classList.toggle("active", t.getAttribute("data-tab") === tabName);
+                });
+                panels.forEach(function (p) {
+                    p.classList.toggle("active", p === panel);
+                });
+            }
+            // Clear subtabs/subpanels within this panel only.
+            subs.forEach(function (s) { s.classList.remove("active"); });
+            subpanels.forEach(function (p) { p.classList.remove("active"); });
+
+            if (!wasActive) {
+                sub.classList.add("active");
+                subpanel.classList.add("active");
+                root.classList.add("has-selection");
+            } else {
+                // Subtab deselected: if nothing else is active, drop has-selection.
+                var anyActive = root.querySelector(".tab.active, .subtab.active");
+                if (!anyActive) root.classList.remove("has-selection");
+            }
         }
 
         tabs.forEach(function (t) {
             t.addEventListener("click", function () {
-                activate(t.getAttribute("data-tab"));
+                activateTab(t.getAttribute("data-tab"));
             });
         });
 
@@ -89,19 +133,14 @@
             var sub = e.target.closest ? e.target.closest(".subtab") : null;
             if (!sub || !root.contains(sub)) return;
             var panel = sub.closest(".tab-panel");
-            Array.prototype.forEach.call(
-                panel.querySelectorAll(":scope > .subtabs > .subtab"),
-                function (t) { t.classList.toggle("active", t === sub); }
-            );
-            var name = sub.getAttribute("data-chain");
-            Array.prototype.forEach.call(
-                panel.querySelectorAll(":scope > .subpanel"),
-                function (p) { p.classList.toggle("active", p.getAttribute("data-chain") === name); }
-            );
+            if (!panel) return;
+            e.stopPropagation();
+            activateSubtab(sub.getAttribute("data-chain"), panel);
         });
 
+        // Tabs are visible but no panel is active by default — `.has-selection`
+        // is only added on first user click.
         root.classList.add("tabs-on");
-        activate(tabs[0].getAttribute("data-tab"));
         root.dataset.tabsInit = "1";
     }
 

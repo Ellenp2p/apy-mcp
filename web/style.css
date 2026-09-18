@@ -177,7 +177,11 @@ body {
 .status.err .status-dot { background: var(--red); box-shadow: 0 0 10px rgba(255, 122, 122, 0.7); }
 
 /* ── Results tabs (protocol → chain) ───────────────────── */
-/* Without JS the `tabs-on` class is absent: tab bars hide, all panels show. */
+/* Toggle semantics: nothing selected by default → all panels visible (no
+   `.has-selection` class on `.results`). When the user clicks a tab/
+   subtab, `.has-selection` is added and only `.active` panels/subpanels
+   stay visible. Click the same tab again → `.has-selection` removed,
+   everything visible again. */
 .results .tabs, .results .subtabs { display: none; }
 .results.tabs-on .tabs {
     display: flex;
@@ -185,8 +189,10 @@ body {
     flex-wrap: wrap;
     margin-bottom: 24px;
 }
-.results.tabs-on .tab-panel { display: none; }
-.results.tabs-on .tab-panel.active { display: block; }
+.results.tabs-on.has-selection .tab-panel:not(.active) { display: none; }
+.results.tabs-on.has-selection .subpanel:not(.active) { display: none; }
+.results.tabs-on .tab-panel { display: block; }
+.results.tabs-on .subpanel { display: block; }
 .results.tabs-on .subtabs {
     display: flex;
     gap: 6px;
@@ -220,9 +226,6 @@ body {
     border-color: var(--accent);
     background: rgba(139, 124, 255, 0.14);
 }
-
-.results.tabs-on .subpanel { display: none; }
-.results.tabs-on .subpanel.active { display: block; }
 
 .pool-sub {
     margin: 20px 0 10px;
@@ -273,11 +276,34 @@ th .sort-ind {
    previous render for an inactive column. */
 
 /* ── htmx partial refresh (no full reload) ─────────────── */
-/* Sort-header clicks run cache_only (~2ms) — silent, no indicator, so the
-   swap looks instant and there's no flash from a half-applied opacity
-   transition. The filter form submits use hx-indicator="#results-region",
-   so the only in-flight feedback is a small spinner on the status dot
-   while the form is genuinely waiting on the network. */
+/* Sort-header clicks and form submits go through hx-indicator="#results-region"
+   so the in-flight state is visible. Cache_only sort clicks are ~2ms so the
+   spinner is barely perceptible; force_refresh + bad ALCHEMY_KEY drags to ~3s,
+   during which the dim + spinning dot + inline "查询中…" overlay tell the
+   user something is happening. */
+.htmx-request.results-region,
+.results-region.htmx-request {
+    opacity: 0.6;
+    pointer-events: none;
+    position: relative;
+}
+.htmx-request.results-region::after {
+    content: "查询中…";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    padding: 14px 28px;
+    background: var(--bg-soft);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    color: var(--accent);
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+    z-index: 5;
+}
 .htmx-request .status-dot {
     position: relative;
 }
@@ -299,6 +325,67 @@ td.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; colo
 td.num.pos { color: var(--green); font-weight: 700; }
 td.num.neg { color: #ff9c9c; }
 td.asset-cell { font-weight: 650; }
+
+/* ── Asset row icons (protocol / chain / asset) ────────── */
+/* Each icon is a 22px square. The <img> inside tries to load a real PNG
+   from Trust Wallet's CDN; on error (404 or network failure) the JS
+   onerror handler hides the broken image and reveals the sibling
+   `.ic-fb` fallback (colored letter). */
+.asset-cell { display: flex; align-items: center; gap: 10px; }
+.asset-icons { display: inline-flex; gap: 5px; flex-shrink: 0; }
+.ic {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: #1a1a26;
+    flex-shrink: 0;
+}
+.ic-img {
+    width: 22px;
+    height: 22px;
+    object-fit: contain;
+    display: block;
+    border-radius: 6px;
+}
+.ic-fb {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 9.5px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: #fff;
+    line-height: 1;
+    border-radius: 6px;
+    text-transform: uppercase;
+}
+/* When the .ic-img fails to load, JS swaps its display and reveals
+   the .ic-fb — no extra CSS class needed. */
+.proto-fb[data-proto="aave_v3"] { background: #b6509e; }
+.proto-fb[data-proto="spark"]   { background: #fdd23f; color: #1a1a2e; }
+.proto-fb[data-proto="blend"]   { background: #f7a800; }
+
+.chain-fb[data-chain="ethereum"]  { background: #627eea; }
+.chain-fb[data-chain="arbitrum"]  { background: #28a0f0; }
+.chain-fb[data-chain="optimism"]  { background: #ff0420; }
+.chain-fb[data-chain="polygon"]   { background: #8247e5; }
+.chain-fb[data-chain="avalanche"] { background: #e84142; }
+.chain-fb[data-chain="sonic"]     { background: #1c1c1c; }
+.chain-fb[data-chain="gnosis"]    { background: #04795b; }
+.chain-fb[data-chain="base"]      { background: #0052ff; }
+.chain-fb[data-chain="scroll"]    { background: #f5f5f5; color: #1a1a2e; }
+.chain-fb[data-chain="zksync"]    { background: #1e1e1e; }
+.chain-fb[data-chain="bnb"]       { background: #f0b90b; color: #1a1a2e; }
+.chain-fb[data-chain="stellar"]   { background: #08b5e5; }
+
+.asset-name { white-space: nowrap; }
 
 /* ── Utilization gauge ─────────────────────────────────── */
 .util { display: flex; align-items: center; gap: 12px; min-width: 170px; }

@@ -5,6 +5,7 @@ mod api;
 mod chains;
 mod db;
 mod http;
+mod icons;
 #[cfg(feature = "mcp")]
 mod mcp;
 #[cfg(not(feature = "mcp"))]
