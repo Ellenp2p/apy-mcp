@@ -173,15 +173,37 @@ body {
     font-weight: 700;
     letter-spacing: 0.3px;
 }
+
+/* Toggle pill that swaps between the grouped (tabs) view and the global
+   sorted table. Sits at the end of the status line, only rendered when
+   the page is in a non-default sort mode. */
+.view-toggle {
+    margin-left: auto;
+    padding: 3px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    text-decoration: none;
+    background: rgba(139, 124, 255, 0.08);
+    transition: background 0.12s ease;
+}
+.view-toggle:hover { background: rgba(139, 124, 255, 0.18); }
+}
 .status.err { color: var(--red); }
 .status.err .status-dot { background: var(--red); box-shadow: 0 0 10px rgba(255, 122, 122, 0.7); }
 
 /* ── Results tabs (protocol → chain) ───────────────────── */
-/* Toggle semantics: nothing selected by default → all panels visible (no
-   `.has-selection` class on `.results`). When the user clicks a tab/
-   subtab, `.has-selection` is added and only `.active` panels/subpanels
-   stay visible. Click the same tab again → `.has-selection` removed,
-   everything visible again. */
+/* Three states:
+   (1) no `.has-selection` on `.results` — all panels + subpanels visible
+   (2) `.has-selection` set, no subtab active — hide non-active PANELS, but
+       show ALL subpanels of the active panel (so a single-chain protocol
+       like Spark doesn't show an empty panel after `clearAllActive` strips
+       its only subpanel's .active class)
+   (3) `.has-selection` set, a subtab is active — hide non-active subpanels
+       within the active panel only. Other panels are already hidden by (2). */
 .results .tabs, .results .subtabs { display: none; }
 .results.tabs-on .tabs {
     display: flex;
@@ -189,10 +211,13 @@ body {
     flex-wrap: wrap;
     margin-bottom: 24px;
 }
-.results.tabs-on.has-selection .tab-panel:not(.active) { display: none; }
-.results.tabs-on.has-selection .subpanel:not(.active) { display: none; }
-.results.tabs-on .tab-panel { display: block; }
+.results.tabs-on .tab-panel,
 .results.tabs-on .subpanel { display: block; }
+.results.tabs-on.has-selection .tab-panel:not(.active) { display: none; }
+/* Subpanel hide kicks in only when the active panel has at least one
+   `.active` subtab — i.e. the user explicitly picked a chain. */
+.results.tabs-on.has-selection .tab-panel.active:has(.subtab.active)
+    .subpanel:not(.active) { display: none; }
 .results.tabs-on .subtabs {
     display: flex;
     gap: 6px;
@@ -325,6 +350,17 @@ td.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; colo
 td.num.pos { color: var(--green); font-weight: 700; }
 td.num.neg { color: #ff9c9c; }
 td.asset-cell { font-weight: 650; }
+
+/* Global sort table — one row per asset across every protocol/chain.
+   Renders only when the user picks a non-default sort. */
+.results.global { margin-top: 4px; }
+.global-table { overflow-x: auto; }
+.global-table table { min-width: 920px; }
+.global-table th { color: var(--muted); }
+.global-table .col-proto,
+.global-table .col-chain { width: 1%; white-space: nowrap; padding-right: 4px; }
+.global-table .col-proto .ic,
+.global-table .col-chain .ic { width: 22px; }
 
 /* ── Asset row icons (protocol / chain / asset) ────────── */
 /* Each icon is a 22px square. The <img> inside tries to load a real PNG

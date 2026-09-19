@@ -636,7 +636,153 @@ fn ResultsTabs(pools: Vec<PoolRates>, sort: SortSpec, filters: QueryRatesParams)
     }
 }
 
-/// Renders the whole page. `data` is everything SSR needs.
+/// Flat global table — one row per asset across every protocol/chain,
+/// sorted by the active `sort` field. Replaces the tabbed `ResultsTabs`
+/// view when the user explicitly picks a non-default sort (clicks a
+/// column header) so they see one ordered list across all protocols
+/// rather than per-pool sort within each tab.
+#[component]
+fn ResultsGlobalTable(
+    pools: Vec<PoolRates>,
+    sort: SortSpec,
+    filters: QueryRatesParams,
+) -> Element {
+    // Flatten every pool's assets into one list, tagging each with its
+    // owning pool's protocol/chain so the row can render the right
+    // icons and the sort can be globally consistent.
+    let mut rows: Vec<(PoolRates, AssetRate)> = Vec::new();
+    for pool in pools.iter() {
+        for asset in pool.assets.iter() {
+            rows.push((pool.clone(), asset.clone()));
+        }
+    }
+    // Global sort: re-sort the flat list by the active field. Pulled
+    // out into a small closure so the AssetRow rendering stays clean.
+    let sort_field = sort.field;
+    let sort_dir = sort.dir;
+    rows.sort_by(|a, b| {
+        let key = |pair: &(PoolRates, AssetRate)| -> std::cmp::Ordering {
+            let asset = &pair.1;
+            match sort_field {
+                "asset" => asset.asset_name.cmp(&b.1.asset_name),
+                "supply_apy" => asset
+                    .supply_apy
+                    .partial_cmp(&b.1.supply_apy)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                "borrow_apy" => asset
+                    .borrow_apy
+                    .partial_cmp(&b.1.borrow_apy)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                "utilization" => asset
+                    .utilization
+                    .partial_cmp(&b.1.utilization)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                _ => std::cmp::Ordering::Equal,
+            }
+        };
+        if sort_dir == "asc" {
+            key(a).cmp(&key(b))
+        } else {
+            key(b).cmp(&key(a))
+        }
+    });
+
+    let (asset_f, asset_d) = sort_target("asset", sort);
+    let (supply_f, supply_d) = sort_target("supply_apy", sort);
+    let (borrow_f, borrow_d) = sort_target("borrow_apy", sort);
+    let (util_f, util_d) = sort_target("utilization", sort);
+
+    rsx! {
+        div { class: "results global",
+            div { class: "global-table",
+                table {
+                    thead {
+                        tr {
+                            th { "协议" }
+                            th { "链" }
+                            SortHeader { label: "资产", field: "asset", active: sort, href: sort_url(&filters, asset_f, asset_d), align_right: false }
+                            SortHeader { label: "Supply APY", field: "supply_apy", active: sort, href: sort_url(&filters, supply_f, supply_d), align_right: true }
+                            SortHeader { label: "Borrow APY", field: "borrow_apy", active: sort, href: sort_url(&filters, borrow_f, borrow_d), align_right: true }
+                            SortHeader { label: "Utilization", field: "utilization", active: sort, href: sort_url(&filters, util_f, util_d), align_right: false }
+                        }
+                    }
+                    tbody {
+                        for (pool, asset) in rows {
+                            GlobalAssetRow { pool: pool, asset: asset }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One row of the global table: protocol icon, chain icon, asset icon +
+/// name (with the existing tooltip), and the three numeric cells.
+#[component]
+fn GlobalAssetRow(pool: PoolRates, asset: AssetRate) -> Element {
+    let proto_url = protocol_icon_url(&pool.protocol);
+    let chain_url = chain_icon_url(&pool.chain);
+    let asset_url = asset_icon_url(&pool.chain, &asset.asset_id);
+    let asset_sym_url = asset_symbol_icon_url(&asset.asset_name);
+    let proto_fb = proto_label(&pool.protocol);
+    let chain_fb = chain_label(&pool.chain);
+    let asset_bg = asset_chip_color(&asset.asset_id);
+    let asset_letter = asset_chip_letter(&asset.asset_name);
+    rsx! {
+        tr {
+            td { class: "col-proto",
+                span { class: "ic proto-ic",
+                    if let Some(u) = proto_url {
+                        img { class: "ic-img", src: "{u}", loading: "lazy", alt: "{pool.protocol}",
+                              "onerror": "this.style.display='none'; this.nextElementSibling.style.display='inline-flex'" }
+                    }
+                    span { class: "ic-fb proto-fb", "data-proto": "{pool.protocol}",
+                           title: "{pool.protocol}", "{proto_fb}" }
+                }
+            }
+            td { class: "col-chain",
+                span { class: "ic chain-ic",
+                    if let Some(u) = chain_url {
+                        img { class: "ic-img", src: "{u}", loading: "lazy", alt: "{pool.chain}",
+                              "onerror": "this.style.display='none'; this.nextElementSibling.style.display='inline-flex'" }
+                    }
+                    span { class: "ic-fb chain-fb", "data-chain": "{pool.chain}",
+                           title: "{pool.chain}", "{chain_fb}" }
+                }
+            }
+            td { class: "asset-cell",
+                div { class: "asset-icons",
+                    span { class: "ic asset-ic",
+                        if let Some(u) = asset_url {
+                            img { class: "ic-img", src: "{u}", loading: "lazy", alt: "{asset.asset_name}",
+                                  "onerror": "this.style.display='none'; this.parentElement.querySelector('.ic-img-symbol').style.display='block';" }
+                        }
+                        if let Some(u) = asset_sym_url {
+                            img { class: "ic-img ic-img-symbol", src: "{u}", loading: "lazy", alt: "{asset.asset_name}",
+                                  style: "display:none",
+                                  "onerror": "this.style.display='none'; this.nextElementSibling.style.display='inline-flex';" }
+                        }
+                        span { class: "ic-fb asset-fb",
+                               style: "background: {asset_bg}",
+                               title: "{asset.asset_name}",
+                               "{asset_letter}" }
+                    }
+                }
+                span { class: "asset-name tip",
+                    "{asset.asset_name}"
+                    span { class: "tip-box",
+                        span { class: "tip-row", "总供应 ", b { "{fmt_num(asset.total_supplied)}" } }
+                        span { class: "tip-row", "总借出 ", b { "{fmt_num(asset.total_borrowed)}" } }
+                    }
+                }
+            }
+            td { class: "num pos", "{fmt_pct(asset.supply_apy)}" }
+            td { class: "num neg", "{fmt_pct(asset.borrow_apy)}" }
+            td { Gauge { u: asset.utilization } }
+        }
+    }
+}
 fn render_page(data: &PageData) -> String {
     let body = rsx! {
         body {
@@ -691,9 +837,16 @@ fn render_results_only(data: &PageData) -> String {
     dioxus::ssr::render_element(element)
 }
 
-/// Notice + status line + (empty OR tabs). This is the region htmx swaps on
-/// sort/filter clicks; the rest of the page (form, topbar, footer) stays put
-/// so user input isn't lost and there's no scroll/flicker.
+/// Notice + status line + (empty OR tabs OR global table). This is the
+/// region htmx swaps on sort/filter clicks; the rest of the page (form,
+/// topbar, footer) stays put so user input isn't lost and there's no
+/// scroll/flicker.
+///
+/// When the user clicks a sort header, `data.sort` carries the active
+/// sort field. We detect a non-default sort and switch to a flat global
+/// table that sorts every asset across every protocol/chain in one shot
+/// — the tabbed view sorts assets within each pool only, which is useless
+/// when the user wants to find the highest-APY asset globally.
 #[component]
 fn ResultsSection(data: PageData) -> Element {
     let mut pools = data.response.pools.clone();
@@ -703,7 +856,12 @@ fn ResultsSection(data: PageData) -> Element {
     let fetched = data.response.fetched_at.clone();
     let notice = data.notice.clone();
     let empty = pools.is_empty();
-    let pool_count = pools.len();
+    let asset_count: usize = pools.iter().map(|p| p.assets.len()).sum();
+    // The default landing view is the tabbed (protocol-grouped) view;
+    // any explicit sort click flips to a single global table so the user
+    // sees one ordered list across all protocols/chains.
+    let is_default_sort = data.sort.field == DEFAULT_SORT.field
+        && data.sort.dir == DEFAULT_SORT.dir;
     let mut unique_protocols = pools.iter().map(|p| p.protocol.clone()).collect::<Vec<_>>();
     unique_protocols.sort();
     unique_protocols.dedup();
@@ -711,6 +869,8 @@ fn ResultsSection(data: PageData) -> Element {
     unique_chains.sort();
     unique_chains.dedup();
     let timestamp = short_timestamp(&fetched);
+    let sort = data.sort;
+    let filters = data.filters;
 
     rsx! {
         if let Some(ref n) = notice {
@@ -730,8 +890,8 @@ fn ResultsSection(data: PageData) -> Element {
                 div { class: "status",
                     span { class: "status-dot" }
                     span { "Tracking " }
-                    span { class: "status-num", "{pool_count}" }
-                    span { " pools across " }
+                    span { class: "status-num", "{asset_count}" }
+                    span { " assets across " }
                     span { class: "status-num", "{unique_protocols.len()}" }
                     span { " protocols on " }
                     span { class: "status-num", "{unique_chains.len()}" }
@@ -740,8 +900,17 @@ fn ResultsSection(data: PageData) -> Element {
                     if data.from_cache_only {
                         span { class: "cache-pill", "缓存数据" }
                     }
+                    if !is_default_sort {
+                        a { class: "view-toggle", href: "/",
+                            title: "返回按协议 / 链分组",
+                            "按协议/链分组" }
+                    }
                 }
-                ResultsTabs { pools: pools, sort: data.sort, filters: data.filters }
+                if is_default_sort {
+                    ResultsTabs { pools: pools, sort: sort, filters: filters }
+                } else {
+                    ResultsGlobalTable { pools: pools, sort: sort, filters: filters }
+                }
             }
         }
     }

@@ -3,19 +3,33 @@ use primitive_types::H160;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 use super::providers;
 
-/// Chain configuration with RPC URL
+/// Chain configuration with RPC URLs
 #[derive(Debug, Clone)]
 pub struct ChainConfig {
     pub chain_id: u64,
     pub name: String,
+    /// Primary public RPC. Tried first.
     pub rpc_url: String,
+    /// Fallback public RPCs tried in order if the primary fails or
+    /// rate-limits. Public endpoints go down frequently; having a couple
+    /// of fallbacks per chain keeps Aave V3 rates flowing when one is
+    /// having a bad day.
+    pub rpc_fallbacks: Vec<String>,
     /// AaveProtocolDataProvider contract address for this chain
     pub aave_data_provider: H160,
 }
+
+/// Concurrency cap on simultaneous RPC calls across all chains. Public
+/// RPCs (llamarpc, publicnode, drpc.org free tier) rate-limit at ~5-10 RPS
+/// per IP — letting 11 chains fire in parallel tends to land most of them
+/// in 429 territory. 5 keeps the total per-second outgoing RPC rate well
+/// under any single endpoint's limit while still pulling 11 chains in a
+/// couple of seconds.
+const GLOBAL_RPC_CONCURRENCY: usize = 5;
 
 /// Per-chain provider assignment
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +57,11 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 1,
             name: "ethereum".to_string(),
             rpc_url: "https://eth.llamarpc.com".to_string(),
+            rpc_fallbacks: vec![
+                "https://rpc.ankr.com/eth".to_string(),
+                "https://ethereum-rpc.publicnode.com".to_string(),
+                "https://cloudflare-eth.com".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("0a16f2FCC0D44FaE41cc54e079281D84A363bECD").unwrap(),
             ),
@@ -51,6 +70,10 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 137,
             name: "polygon".to_string(),
             rpc_url: "https://polygon.llamarpc.com".to_string(),
+            rpc_fallbacks: vec![
+                "https://polygon-rpc.com".to_string(),
+                "https://polygon-bor-rpc.publicnode.com".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("243Aa95cAC2a25651eda86e80bEe66114413c43b").unwrap(),
             ),
@@ -59,6 +82,10 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 42161,
             name: "arbitrum".to_string(),
             rpc_url: "https://arb1.arbitrum.io/rpc".to_string(),
+            rpc_fallbacks: vec![
+                "https://rpc.ankr.com/arbitrum".to_string(),
+                "https://arbitrum-one-rpc.publicnode.com".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap(),
             ),
@@ -67,6 +94,10 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 10,
             name: "optimism".to_string(),
             rpc_url: "https://mainnet.optimism.io".to_string(),
+            rpc_fallbacks: vec![
+                "https://rpc.ankr.com/optimism".to_string(),
+                "https://optimism-rpc.publicnode.com".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap(),
             ),
@@ -75,6 +106,10 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 43114,
             name: "avalanche".to_string(),
             rpc_url: "https://api.avax.network/ext/bc/C/rpc".to_string(),
+            rpc_fallbacks: vec![
+                "https://avalanche-c-chain-rpc.publicnode.com".to_string(),
+                "https://rpc.ankr.com/avalanche".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("69FA688f1Dc47d4B5d8029D5a35FB7a548310654").unwrap(),
             ),
@@ -83,6 +118,10 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 8453,
             name: "base".to_string(),
             rpc_url: "https://mainnet.base.org".to_string(),
+            rpc_fallbacks: vec![
+                "https://base-rpc.publicnode.com".to_string(),
+                "https://rpc.ankr.com/base".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("d82a47fdebce5b02a5a39c85d4af4f60b89f4544").unwrap(),
             ),
@@ -91,6 +130,9 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 100,
             name: "gnosis".to_string(),
             rpc_url: "https://rpc.gnosis.gateway.fm".to_string(),
+            rpc_fallbacks: vec![
+                "https://gnosis-rpc.publicnode.com".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("501B4c19dd9C2e06E94dA7b6D5Ed4ddA013EC741").unwrap(),
             ),
@@ -99,14 +141,21 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 56,
             name: "bnb".to_string(),
             rpc_url: "https://bsc-dataseed.binance.org".to_string(),
+            rpc_fallbacks: vec![
+                "https://bsc-rpc.publicnode.com".to_string(),
+                "https://rpc.ankr.com/bsc".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
-                &hex::decode("43d6d4d6493d1d9A70e00B5bba9F76E4D33aE57E").unwrap(),
+                &hex::decode("43d6d4d6493d1d9A70e00B5bba9F76e4D33aE57E").unwrap(),
             ),
         },
         ChainConfig {
             chain_id: 534352,
             name: "scroll".to_string(),
             rpc_url: "https://rpc.scroll.io".to_string(),
+            rpc_fallbacks: vec![
+                "https://scroll-rpc.publicnode.com".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("DC3c19C892B90dB8B486F1Ba63e48Ee8b85F6aE8").unwrap(),
             ),
@@ -115,6 +164,9 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 324,
             name: "zksync".to_string(),
             rpc_url: "https://mainnet.era.zksync.io".to_string(),
+            rpc_fallbacks: vec![
+                "https://zksync-era-rpc.publicnode.com".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("E39Da74E2fDe81aA6829CC37B8cD51E1B209b0f2").unwrap(),
             ),
@@ -123,6 +175,9 @@ pub fn default_chain_configs() -> Vec<ChainConfig> {
             chain_id: 146,
             name: "sonic".to_string(),
             rpc_url: "https://rpc.soniclabs.com".to_string(),
+            rpc_fallbacks: vec![
+                "https://sonic-rpc.publicnode.com".to_string(),
+            ],
             aave_data_provider: H160::from_slice(
                 &hex::decode("c0a344397cfa89dF1e1d3e4fb330834D789cF2CD").unwrap(),
             ),
@@ -161,6 +216,14 @@ pub struct RpcManager {
     /// Global default provider name + API key
     default_provider: Arc<RwLock<Option<(String, Option<String>)>>>,
     http_client: reqwest::Client,
+    /// Caps the total in-flight RPC calls across all chains. Without this
+    /// the 11-chain prewarm launches ~33 concurrent requests (Aave V3
+    /// fetches `getAllReservesTokens` then `getReserveData` per reserve
+    /// × MAX_CONCURRENT_RPC=8) and most public RPCs rate-limit / 503
+    /// under that pressure, so only 1-2 chains land. The semaphore lets
+    /// chains fan out gradually and stay under any single endpoint's RPS
+    /// limit.
+    rpc_semaphore: Arc<Semaphore>,
 }
 
 impl RpcManager {
@@ -174,6 +237,7 @@ impl RpcManager {
             chain_providers: Arc::new(RwLock::new(HashMap::new())),
             default_provider: Arc::new(RwLock::new(None)),
             http_client: reqwest::Client::new(),
+            rpc_semaphore: Arc::new(Semaphore::new(GLOBAL_RPC_CONCURRENCY)),
         }
     }
 
@@ -406,6 +470,12 @@ impl RpcManager {
     }
 
     /// Call a contract function (generic EVM call)
+    ///
+    /// Tries the configured `rpc_url` first, then each `rpc_fallbacks` entry
+    /// in order. Any 4xx/5xx/timeout/JSON-error makes the next endpoint
+    /// the next attempt; the first 2xx with a parseable result wins. The
+    /// global semaphore caps in-flight RPC calls so a 11-chain prewarm
+    /// doesn't open 33+ TCP connections to the same upstream.
     pub async fn call_contract(
         &self,
         chain_name: &str,
@@ -430,34 +500,64 @@ impl RpcManager {
             ],
         };
 
-        let response: JsonRpcResponse = self
-            .http_client
-            .post(&config.rpc_url)
-            .json(&request)
-            .timeout(std::time::Duration::from_secs(4))
-            .send()
-            .await
-            .context("Failed to send RPC request")?
-            .json()
-            .await
-            .context("Failed to parse RPC response")?;
-
-        if let Some(error) = response.error {
-            anyhow::bail!("RPC error: {}", error.message);
+        let mut endpoints = vec![config.rpc_url.clone()];
+        endpoints.extend(config.rpc_fallbacks.iter().cloned());
+        let mut last_err: Option<String> = None;
+        for url in endpoints {
+            // Drop the permit at the end of the iteration. We acquire_owned()
+            // (returning an OwnedSemaphorePermit) so the for-loop can move the
+            // permit out without fighting the borrow checker.
+            let _permit = self.rpc_semaphore.clone().acquire_owned().await.ok();
+            let attempt = self
+                .http_client
+                .post(&url)
+                .json(&request)
+                .timeout(std::time::Duration::from_secs(4))
+                .send()
+                .await;
+            let res = match attempt {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = Some(format!("{}: {}", url, e));
+                    continue;
+                }
+            };
+            if !res.status().is_success() {
+                last_err = Some(format!("{} returned {}", url, res.status()));
+                continue;
+            }
+            let parsed: Result<JsonRpcResponse, _> = res.json().await;
+            let parsed = match parsed {
+                Ok(p) => p,
+                Err(e) => {
+                    last_err = Some(format!("{} parse: {}", url, e));
+                    continue;
+                }
+            };
+            if let Some(error) = parsed.error {
+                last_err = Some(format!("{} RPC error: {}", url, error.message));
+                continue;
+            }
+            let result_str = parsed
+                .result
+                .context("No result in RPC response")?
+                .as_str()
+                .context("Result is not a string")?
+                .to_string();
+            let hex_str = result_str.strip_prefix("0x").unwrap_or(&result_str);
+            match hex::decode(hex_str) {
+                Ok(b) => return Ok(b),
+                Err(e) => {
+                    last_err = Some(format!("{} decode hex: {}", url, e));
+                    continue;
+                }
+            }
         }
-
-        let result_str = response
-            .result
-            .context("No result in RPC response")?
-            .as_str()
-            .context("Result is not a string")?
-            .to_string();
-
-        // Remove "0x" prefix and decode hex
-        let hex_str = result_str.strip_prefix("0x").unwrap_or(&result_str);
-        let bytes = hex::decode(hex_str).context("Failed to decode hex result")?;
-
-        Ok(bytes)
+        anyhow::bail!(
+            "all RPC endpoints failed for {}: {}",
+            chain_name,
+            last_err.unwrap_or_else(|| "no endpoints".to_string())
+        )
     }
 }
 
